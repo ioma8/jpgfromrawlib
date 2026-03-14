@@ -1,1 +1,4 @@
 /target
+.DS_Store
+/perf_artifacts/latest
+/perf_artifacts/results

@@ -25,6 +25,7 @@ pub struct EmbeddedJpegInfo {
     orientation: Option<u16>,
 }
 
+#[derive(Clone, Copy)]
 pub enum FindJpegType {
     Largest,
     Smallest,
@@ -50,14 +51,14 @@ fn find_tiff_header_offset(raw_buf: &[u8]) -> Result<usize> {
         let slice_end = slice_start + 10;
         ensure!(slice_end <= raw_buf.len(), "Invalid Exif header position");
         let slice = &raw_buf[slice_start..slice_end];
-        let tiff_found = memmem::find_iter(&slice, TIFF_HEADER).next();
+        let tiff_found = memmem::find_iter(slice, TIFF_HEADER).next();
         if let Some(tiff_pos) = tiff_found {
-            println!("Found TIFF header at: {}", tiff_pos);
+            println!("Found TIFF header at: {tiff_pos}");
             return Ok(slice_start + tiff_pos);
         }
-        let tiff_found = memmem::find_iter(&slice, TIFF_HEADERMM).next();
+        let tiff_found = memmem::find_iter(slice, TIFF_HEADERMM).next();
         if let Some(tiff_pos) = tiff_found {
-            println!("Found TIFF header2 at: {}", tiff_pos);
+            println!("Found TIFF header2 at: {tiff_pos}");
             return Ok(slice_start + tiff_pos);
         }
         return Ok(slice_start);
@@ -220,15 +221,19 @@ const fn get_header_bytes(orientation: u16) -> [u8; 34] {
     ]
 }
 
-async fn get_jpeg_data(jpeg_buf: &[u8], jpeg_info: &EmbeddedJpegInfo) -> Result<Vec<u8>> {
+fn get_jpeg_data(jpeg_buf: &[u8], jpeg_info: &EmbeddedJpegInfo) -> Vec<u8> {
     let mut jpeg_data = Vec::with_capacity(jpeg_buf.len() + 34);
     jpeg_data.extend_from_slice(&get_header_bytes(jpeg_info.orientation.unwrap_or(1)));
     jpeg_data.extend_from_slice(&jpeg_buf[2..]);
-    Ok(jpeg_data)
+    jpeg_data
 }
 
 /// Process a single RAW file to extract the embedded JPEG, and then write the extracted JPEG to
 /// the output directory.
+///
+/// # Errors
+///
+/// Returns an error if the RAW file cannot be parsed or if writing the JPEG output fails.
 pub async fn process_file(
     entry_path: &Path,
     out_dir: &Path,
@@ -245,7 +250,11 @@ pub async fn process_file(
     Ok(())
 }
 
-// Process a single RAW file to extract the embedded JPEG and return the JPEG bytes.
+/// Process a single RAW file to extract the embedded JPEG and return the JPEG bytes.
+///
+/// # Errors
+///
+/// Returns an error if the RAW file cannot be opened, mapped, or parsed.
 pub async fn process_file_bytes(entry_path: &Path, find_type: FindJpegType) -> Result<Vec<u8>> {
     println!("Processing file: {}", entry_path.display());
     let start = Instant::now();
@@ -253,7 +262,7 @@ pub async fn process_file_bytes(entry_path: &Path, find_type: FindJpegType) -> R
     println!("Time to open_raw: {:?}", start.elapsed());
 
     let start = Instant::now();
-    let raw_buf = platform::mmap_raw(in_file)?;
+    let raw_buf = platform::mmap_raw(&in_file)?;
     println!("Time to mmap_raw: {:?}", start.elapsed());
 
     let start = Instant::now();
@@ -278,13 +287,11 @@ pub async fn process_file_bytes(entry_path: &Path, find_type: FindJpegType) -> R
     At offset 8: 57 45 42 50 (ASCII "WEBP")
      */
 
-    if let Err(_) = tiff_offset_result {
+    let Ok(tiff_offset) = tiff_offset_result else {
         return Ok(raw_buf.to_vec());
-    }
+    };
 
-    let tiff_offset = tiff_offset_result.unwrap();
-
-    println!("Offset found at: {}", tiff_offset);
+    println!("Offset found at: {tiff_offset}");
     println!("Time to find_tiff_header_offset: {:?}", start.elapsed());
 
     let start = Instant::now();
@@ -298,7 +305,7 @@ pub async fn process_file_bytes(entry_path: &Path, find_type: FindJpegType) -> R
         println!("Time to extract_jpeg: {:?}", start.elapsed());
 
         let start = Instant::now();
-        let jpeg_data = get_jpeg_data(jpeg_buf, &jpeg_info).await?;
+        let jpeg_data = get_jpeg_data(jpeg_buf, &jpeg_info);
         println!("Time to get_jpeg_data: {:?}", start.elapsed());
         jpeg_data
     } else {

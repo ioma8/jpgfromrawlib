@@ -9,7 +9,7 @@ use windows::Win32::System::Threading::GetCurrentProcess;
 
 use super::EmbeddedJpegInfo;
 
-pub fn mmap_raw(file: File) -> Result<Mmap> {
+pub fn mmap_raw(file: &File) -> Result<Mmap> {
     // SAFETY: see comment in unix.rs
     let raw_buf = unsafe { Mmap::map(file.as_raw_handle())? };
     Ok(raw_buf)

@@ -6,7 +6,7 @@ use tokio::fs::File;
 
 use super::EmbeddedJpegInfo;
 
-pub fn mmap_raw(file: File) -> Result<Mmap> {
+pub fn mmap_raw(file: &File) -> Result<Mmap> {
     // SAFETY: mmap in general is unsafe because the lifecycle of the backing bytes are mutable
     // from outside the program.
     //
