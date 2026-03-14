@@ -12,8 +12,6 @@ mod windows;
 
 #[cfg(unix)]
 use unix as platform;
-
-use std::time::Instant;
 #[cfg(windows)]
 use windows as platform;
 
@@ -53,12 +51,10 @@ fn find_tiff_header_offset(raw_buf: &[u8]) -> Result<usize> {
         let slice = &raw_buf[slice_start..slice_end];
         let tiff_found = memmem::find_iter(slice, TIFF_HEADER).next();
         if let Some(tiff_pos) = tiff_found {
-            println!("Found TIFF header at: {tiff_pos}");
             return Ok(slice_start + tiff_pos);
         }
         let tiff_found = memmem::find_iter(slice, TIFF_HEADERMM).next();
         if let Some(tiff_pos) = tiff_found {
-            println!("Found TIFF header2 at: {tiff_pos}");
             return Ok(slice_start + tiff_pos);
         }
         return Ok(slice_start);
@@ -240,12 +236,12 @@ pub async fn process_file(
     relative_path: &Path,
     find_type: FindJpegType,
 ) -> Result<()> {
-    let jpeg_data = process_file_bytes(entry_path, find_type).await?;
     let mut output_file = out_dir.join(relative_path);
     output_file.set_extension("jpg");
     if let Some(parent) = output_file.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
+    let jpeg_data = process_file_bytes(entry_path, find_type).await?;
     tokio::fs::write(&output_file, &jpeg_data).await?;
     Ok(())
 }
@@ -256,16 +252,8 @@ pub async fn process_file(
 ///
 /// Returns an error if the RAW file cannot be opened, mapped, or parsed.
 pub async fn process_file_bytes(entry_path: &Path, find_type: FindJpegType) -> Result<Vec<u8>> {
-    println!("Processing file: {}", entry_path.display());
-    let start = Instant::now();
-    let in_file = platform::open_raw(entry_path).await?;
-    println!("Time to open_raw: {:?}", start.elapsed());
-
-    let start = Instant::now();
+    let in_file = platform::open_raw(entry_path)?;
     let raw_buf = platform::mmap_raw(&in_file)?;
-    println!("Time to mmap_raw: {:?}", start.elapsed());
-
-    let start = Instant::now();
     let tiff_offset_result = find_tiff_header_offset(&raw_buf);
 
     //    Format	Hex Signature (First Bytes)	ASCII (if readable)	Offset	Notes
@@ -290,24 +278,11 @@ pub async fn process_file_bytes(entry_path: &Path, find_type: FindJpegType) -> R
     let Ok(tiff_offset) = tiff_offset_result else {
         return Ok(raw_buf.to_vec());
     };
-
-    println!("Offset found at: {tiff_offset}");
-    println!("Time to find_tiff_header_offset: {:?}", start.elapsed());
-
-    let start = Instant::now();
     let jpeg_info = find_largest_embedded_jpeg(&raw_buf, tiff_offset, find_type);
-    println!("Time to find_largest_embedded_jpeg: {:?}", start.elapsed());
 
     let jpeg_data = if let Ok(jpeg_info) = jpeg_info {
-        let start = Instant::now();
-
         let jpeg_buf = extract_jpeg(&raw_buf, &jpeg_info)?;
-        println!("Time to extract_jpeg: {:?}", start.elapsed());
-
-        let start = Instant::now();
-        let jpeg_data = get_jpeg_data(jpeg_buf, &jpeg_info);
-        println!("Time to get_jpeg_data: {:?}", start.elapsed());
-        jpeg_data
+        get_jpeg_data(jpeg_buf, &jpeg_info)
     } else {
         raw_buf.to_vec()
     };

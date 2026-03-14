@@ -1,8 +1,8 @@
 use anyhow::Result;
-use memmap2::{Advice, Mmap};
+use memmap2::Mmap;
+use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
-use tokio::fs::File;
 
 use super::EmbeddedJpegInfo;
 
@@ -19,19 +19,14 @@ pub fn mmap_raw(file: &File) -> Result<Mmap> {
     // (and thus UB). However, in our case, that's not a problem: we don't rely on such
     // enforcement.
     let raw_buf = unsafe { Mmap::map(file.as_raw_fd())? };
-
-    // Avoid overread into the rest of the RAW, which degrades performance substantially. We will
-    // later update the advice for the JPEG section with Advice::WillNeed. Until then, our accesses
-    // are essentially random: we walk the IFDs, but these are likely in non-sequential pages.
-    raw_buf.advise(Advice::Random)?;
     Ok(raw_buf)
 }
 
-pub async fn open_raw(path: &Path) -> Result<File> {
-    Ok(File::open(path).await?)
+pub fn open_raw(path: &Path) -> Result<File> {
+    Ok(File::open(path)?)
 }
 
 pub fn prefetch_jpeg(raw_buf: &Mmap, jpeg: &EmbeddedJpegInfo) -> Result<()> {
-    raw_buf.advise_range(Advice::WillNeed, jpeg.offset, jpeg.length)?;
+    let _ = (raw_buf, jpeg);
     Ok(())
 }

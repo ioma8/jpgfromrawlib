@@ -137,10 +137,7 @@ async fn process_directory(
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let args = Args::parse();
-
+async fn run(args: Args) -> Result<()> {
     // We would need a copy for each task otherwise, so better just to make it &'static
     let output_dir = Box::leak(Box::new(args.output_dir));
 
@@ -148,4 +145,15 @@ async fn main() -> Result<()> {
     process_directory(&args.input_dir, output_dir, args.extension, args.transfers).await?;
 
     Ok(())
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+    let worker_threads = args.transfers.max(1);
+
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .enable_all()
+        .build()?
+        .block_on(run(args))
 }
