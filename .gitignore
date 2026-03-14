@@ -2,3 +2,7 @@
 .DS_Store
 /perf_artifacts/latest
 /perf_artifacts/results
+/sample_generic
+/sample_raws
+/sample_raws_alt
+/vendor/gpr/data/samples

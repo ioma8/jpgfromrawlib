@@ -2,8 +2,8 @@ use anyhow::Result;
 use memmap2::Mmap;
 use std::fs::File;
 use std::fs::OpenOptions;
-use std::os::windows::io::AsRawHandle;
 use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use windows::Win32::Storage::FileSystem::FILE_FLAG_RANDOM_ACCESS;
 

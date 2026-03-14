@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
+use jpgfromraw::SUPPORTED_EXTENSIONS;
 use jpgfromraw::parser::process_file;
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -25,8 +26,10 @@ struct Args {
 
     /// Look for this extension in addition to the default list.
     ///
-    /// Default list: arw, cr2, crw, dng, erf, kdc, mef, mrw, nef, nrw, orf, pef, raf, raw, rw2,
-    /// rwl, sr2, srf, srw, x3f
+    /// Default list covers common RAW and cinema extensions including 3fr, ari, arw, bay, braw,
+    /// cap, cr2, cr3, cri, crw, dcr, dcs, dng, drf, eip, erf, fff, gpr, iiq, jxs, k25, kdc, mdc,
+    /// mef, mos, mrw, nef, nrw, orf, pef, ptx, pxn, r3d, raf, raw, rw2, rwl, rwz, sr2, srf, srw,
+    /// tco, x3f.
     #[arg(short, long)]
     extension: Option<OsString>,
 }
@@ -49,10 +52,7 @@ async fn process_directory(
     ext: Option<OsString>,
     transfers: usize,
 ) -> Result<()> {
-    let valid_extensions = [
-        "arw", "cr2", "crw", "dng", "erf", "kdc", "mef", "mrw", "nef", "nrw", "orf", "pef", "raf",
-        "raw", "rw2", "rwl", "sr2", "srf", "srw", "x3f",
-    ]
+    let valid_extensions = SUPPORTED_EXTENSIONS
     .iter()
     .flat_map(|&ext| [OsString::from(ext), OsString::from(ext.to_uppercase())])
     .chain(ext.into_iter())
