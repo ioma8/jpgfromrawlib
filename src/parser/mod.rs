@@ -50,12 +50,12 @@ fn find_tiff_header_offset(raw_buf: &[u8]) -> Result<usize> {
         let slice_end = slice_start + 10;
         ensure!(slice_end <= raw_buf.len(), "Invalid Exif header position");
         let slice = &raw_buf[slice_start..slice_end];
-        let tiff_found = memmem::find_iter(&slice, TIFF_HEADER).next();
+        let tiff_found = memmem::find_iter(slice, TIFF_HEADER).next();
         if let Some(tiff_pos) = tiff_found {
             println!("Found TIFF header at: {}", tiff_pos);
             return Ok(slice_start + tiff_pos);
         }
-        let tiff_found = memmem::find_iter(&slice, TIFF_HEADERMM).next();
+        let tiff_found = memmem::find_iter(slice, TIFF_HEADERMM).next();
         if let Some(tiff_pos) = tiff_found {
             println!("Found TIFF header2 at: {}", tiff_pos);
             return Ok(slice_start + tiff_pos);
@@ -278,7 +278,7 @@ pub async fn process_file_bytes(entry_path: &Path, find_type: FindJpegType) -> R
     At offset 8: 57 45 42 50 (ASCII "WEBP")
      */
 
-    if let Err(_) = tiff_offset_result {
+    if tiff_offset_result.is_err() {
         return Ok(raw_buf.to_vec());
     }
 
