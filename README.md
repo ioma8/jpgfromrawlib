@@ -78,24 +78,33 @@ use std::sync::Arc;
 
 use jpgfromraw::{process_file_bytes, FindJpegType};
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 async fn extract_many(paths: Vec<std::path::PathBuf>, concurrency: usize) -> anyhow::Result<Vec<Vec<u8>>> {
+    if concurrency == 0 {
+        anyhow::bail!("concurrency must be at least 1");
+    }
+
     let paths = Arc::new(paths);
     let semaphore = Arc::new(Semaphore::new(concurrency));
-    let mut tasks = Vec::with_capacity(paths.len());
+    let mut tasks = JoinSet::new();
+    let mut outputs = Vec::with_capacity(paths.len());
 
     for index in 0..paths.len() {
         let paths = Arc::clone(&paths);
-        let semaphore = Arc::clone(&semaphore);
-        tasks.push(tokio::spawn(async move {
-            let _permit = semaphore.acquire_owned().await?;
+        let permit = Arc::clone(&semaphore).acquire_owned().await?;
+        tasks.spawn(async move {
+            let _permit = permit;
             process_file_bytes(&paths[index], FindJpegType::Largest).await
-        }));
+        });
+
+        if tasks.len() >= concurrency {
+            outputs.push(tasks.join_next().await.expect("task set is non-empty")??);
+        }
     }
 
-    let mut outputs = Vec::with_capacity(tasks.len());
-    for task in tasks {
-        outputs.push(task.await??);
+    while let Some(task) = tasks.join_next().await {
+        outputs.push(task??);
     }
 
     Ok(outputs)
@@ -123,20 +132,28 @@ orientation tag, so images display the right way up.
 
 ## Building
 
-The vendored fallbacks need a C toolchain, and gpr_tools is built with CMake:
+The vendored RAW fallbacks need a C toolchain, and gpr_tools is built with
+CMake:
 
 - a C compiler (used by `cc` to build the bundled dcraw)
 - `cmake` on the PATH (used to build `vendor/gpr`)
+
+The default feature set also enables AVIF decoding through the `image` crate's
+`avif-native` feature. That uses `dav1d`, so builds need the dav1d development
+package discoverable by `pkg-config` (for example, Homebrew's `dav1d` package
+on macOS). With the default dynamic link mode, the produced binary also needs
+the matching shared library at runtime.
 
 Then a regular `cargo build --release` works.
 
 ### Cargo features
 
 - `generic-raster` (default): enables the heavier image decoders (AVIF, DDS,
-  EXR) for the generic raster fallback. Building with
-  `--no-default-features` drops those decoders and their native
-  dependencies; files with those extensions then go through the RAW
-  fallbacks instead.
+  EXR) for the generic raster fallback. AVIF support comes from
+  `image/avif-native` and depends on dav1d. Building with
+  `--no-default-features` drops AVIF/DDS/EXR support from the generic raster
+  fallback and avoids the dav1d dependency; files with those extensions then go
+  through the RAW fallbacks instead.
 
 ## Testing
 

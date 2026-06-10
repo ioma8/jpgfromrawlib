@@ -1,7 +1,7 @@
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
-use image::codecs::jpeg::JpegEncoder;
 use image::ExtendedColorType;
+use image::codecs::jpeg::JpegEncoder;
 use memchr::memmem;
 use memmap2::Mmap;
 use std::path::Path;
@@ -168,7 +168,10 @@ impl<'a> TiffReader<'a> {
 }
 
 fn find_tiff_header_offset(raw_buf: &[u8]) -> Result<usize> {
-    ensure!(raw_buf.len() >= TIFF_HEADER.len(), "Not enough data for TIFF header");
+    ensure!(
+        raw_buf.len() >= TIFF_HEADER.len(),
+        "Not enough data for TIFF header"
+    );
 
     if raw_buf.starts_with(TIFF_HEADER) || raw_buf.starts_with(TIFF_HEADERMM) {
         return Ok(0);
@@ -412,7 +415,8 @@ fn find_tiff_preview(
 
             match tag {
                 TAG_IMAGE_WIDTH => {
-                    candidate.width = first_u32(&reader, type_id, count, value_field, "ImageWidth")?;
+                    candidate.width =
+                        first_u32(&reader, type_id, count, value_field, "ImageWidth")?;
                 }
                 TAG_IMAGE_LENGTH => {
                     candidate.height =
@@ -689,10 +693,7 @@ impl IfdChainGuard {
             self.visited.len() < MAX_IFD_CHAIN_LEN,
             "TIFF IFD chain exceeds limit"
         );
-        ensure!(
-            !self.visited.contains(&offset),
-            "TIFF IFD cycle detected"
-        );
+        ensure!(!self.visited.contains(&offset), "TIFF IFD cycle detected");
         self.visited.push(offset);
         Ok(())
     }
@@ -705,7 +706,10 @@ fn tiff_reader(raw_buf: &[u8]) -> Result<TiffReader<'_>> {
         is_le || raw_buf.starts_with(TIFF_HEADERMM),
         "Not a valid TIFF file"
     );
-    Ok(TiffReader { buf: raw_buf, is_le })
+    Ok(TiffReader {
+        buf: raw_buf,
+        is_le,
+    })
 }
 
 fn first_u32(
@@ -812,18 +816,26 @@ pub async fn process_file_bytes(entry_path: &Path, find_type: FindJpegType) -> R
         return Ok(jpeg_data);
     }
 
-    decode_raw_preview_fallback(entry_path, &raw_buf).await
+    decode_raw_preview_fallback(entry_path).await
 }
 
-async fn decode_raw_preview_fallback(entry_path: &Path, raw_buf: &[u8]) -> Result<Vec<u8>> {
-    let generic_path = entry_path.to_path_buf();
-    let generic_bytes = raw_buf.to_vec();
-    if let Some(jpeg) = run_optional_blocking_fallback("generic raster", move || {
-        generic::decode_generic_raster_preview(&generic_path, &generic_bytes)
-    })
-    .await?
-    {
-        return Ok(jpeg);
+async fn decode_raw_preview_fallback(entry_path: &Path) -> Result<Vec<u8>> {
+    if generic::is_generic_extension(entry_path) {
+        let generic_path = entry_path.to_path_buf();
+        if let Some(jpeg) = run_optional_blocking_fallback("generic raster", move || {
+            let bytes = std::fs::read(&generic_path).with_context(|| {
+                format!(
+                    "failed to read generic raster source {}",
+                    generic_path.display()
+                )
+            })?;
+            generic::decode_generic_raster_preview(&generic_path, &bytes)
+                .map(|jpeg| jpeg.map(std::borrow::Cow::into_owned))
+        })
+        .await?
+        {
+            return Ok(jpeg);
+        }
     }
 
     let extension = entry_path
@@ -882,8 +894,8 @@ mod tests {
     #[test]
     fn zero_count_tiff_fields_error_instead_of_panicking() {
         let buf = [
-            b'I', b'I', b'*', 0, 8, 0, 0, 0, 1, 0, 0x00, 0x01, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0,
+            b'I', b'I', b'*', 0, 8, 0, 0, 0, 1, 0, 0x00, 0x01, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0,
         ];
         let err = find_tiff_preview(&buf, 0, FindJpegType::Largest).unwrap_err();
         assert!(err.to_string().contains("ImageWidth is empty"));
@@ -891,9 +903,7 @@ mod tests {
 
     #[test]
     fn tiff_ifd_cycles_error_out() {
-        let buf = [
-            b'I', b'I', b'*', 0, 8, 0, 0, 0, 0, 0, 8, 0, 0, 0,
-        ];
+        let buf = [b'I', b'I', b'*', 0, 8, 0, 0, 0, 0, 0, 8, 0, 0, 0];
         let err = find_tiff_preview(&buf, 0, FindJpegType::Largest).unwrap_err();
         assert!(err.to_string().contains("cycle"));
     }
@@ -945,8 +955,7 @@ mod tests {
         let path = temp_dir.path().join("garbage.arw");
         std::fs::write(&path, [0u8; 64]).unwrap();
 
-        let result =
-            block_on_without_tokio(process_file_bytes(&path, FindJpegType::Largest));
+        let result = block_on_without_tokio(process_file_bytes(&path, FindJpegType::Largest));
         assert!(result.is_err());
     }
 
@@ -981,9 +990,11 @@ mod tests {
         let mut jpeg = vec![0xFF, 0xD8];
         jpeg.extend_from_slice(&[0xFF, 0xDB]);
         jpeg.extend_from_slice(&dqt_len.to_be_bytes());
-        jpeg.extend(std::iter::repeat(0).take(1 + dqt_padding));
+        jpeg.extend(std::iter::repeat_n(0, 1 + dqt_padding));
         // SOF0: precision 8, 1x1, one component.
-        jpeg.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00]);
+        jpeg.extend_from_slice(&[
+            0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
+        ]);
         jpeg.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x02]);
         jpeg.extend_from_slice(&[0xFF, 0xD9]);
         assert!(is_valid_jpeg(&jpeg));
@@ -1025,7 +1036,9 @@ mod tests {
     fn marker_scan_matches_reference_on_randomized_buffers() {
         let mut seed = 0x9E3779B97F4A7C15u64;
         let mut next = move || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             seed
         };
 
@@ -1072,15 +1085,25 @@ mod tests {
             .map(|path| std::fs::read(path).unwrap())
             .collect();
 
-        report_stage("find_tiff_header_offset (TIFF at 0)", &buffers, 200, |buf| {
-            std::hint::black_box(find_tiff_header_offset(buf).unwrap());
-        });
+        report_stage(
+            "find_tiff_header_offset (TIFF at 0)",
+            &buffers,
+            200,
+            |buf| {
+                std::hint::black_box(find_tiff_header_offset(buf).unwrap());
+            },
+        );
 
-        report_stage("find_embedded_jpeg_in_tiff Smallest", &buffers, 200, |buf| {
-            std::hint::black_box(
-                find_embedded_jpeg_in_tiff(buf, 0, FindJpegType::Smallest).unwrap(),
-            );
-        });
+        report_stage(
+            "find_embedded_jpeg_in_tiff Smallest",
+            &buffers,
+            200,
+            |buf| {
+                std::hint::black_box(
+                    find_embedded_jpeg_in_tiff(buf, 0, FindJpegType::Smallest).unwrap(),
+                );
+            },
+        );
 
         report_stage("find_embedded_jpeg_in_tiff Largest", &buffers, 200, |buf| {
             std::hint::black_box(
@@ -1108,13 +1131,18 @@ mod tests {
                 find_embedded_jpeg_by_markers(buf, FindJpegType::Largest).unwrap(),
             );
         });
-        report_stage("missing-FF scan Largest (fallback)", scan_buffers, 5, |buf| {
-            std::hint::black_box(find_embedded_jpeg_missing_ff_prefix(
-                buf,
-                FindJpegType::Largest,
-            ))
-            .ok();
-        });
+        report_stage(
+            "missing-FF scan Largest (fallback)",
+            scan_buffers,
+            5,
+            |buf| {
+                std::hint::black_box(find_embedded_jpeg_missing_ff_prefix(
+                    buf,
+                    FindJpegType::Largest,
+                ))
+                .ok();
+            },
+        );
 
         // RAF-like layout: no TIFF magic at offset 0, Exif APP1 near the start of the file.
         let mut raf_like = vec![0u8; scan_buffers[0].len()];
@@ -1138,18 +1166,28 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        report_stage("process_file_bytes Smallest (end-to-end)", &files, 50, |path| {
-            let jpeg = runtime
-                .block_on(process_file_bytes(path, FindJpegType::Smallest))
-                .unwrap();
-            std::hint::black_box(jpeg);
-        });
-        report_stage("process_file_bytes Largest (end-to-end)", &files, 50, |path| {
-            let jpeg = runtime
-                .block_on(process_file_bytes(path, FindJpegType::Largest))
-                .unwrap();
-            std::hint::black_box(jpeg);
-        });
+        report_stage(
+            "process_file_bytes Smallest (end-to-end)",
+            &files,
+            50,
+            |path| {
+                let jpeg = runtime
+                    .block_on(process_file_bytes(path, FindJpegType::Smallest))
+                    .unwrap();
+                std::hint::black_box(jpeg);
+            },
+        );
+        report_stage(
+            "process_file_bytes Largest (end-to-end)",
+            &files,
+            50,
+            |path| {
+                let jpeg = runtime
+                    .block_on(process_file_bytes(path, FindJpegType::Largest))
+                    .unwrap();
+                std::hint::black_box(jpeg);
+            },
+        );
 
         report_stage("open only", &files, 50, |path| {
             std::hint::black_box(platform::open_raw(path).unwrap());
@@ -1163,22 +1201,26 @@ mod tests {
             let raw_buf = platform::mmap_raw(&file).unwrap();
             let tiff_offset = find_tiff_header_offset(&raw_buf).unwrap();
             std::hint::black_box(
-                find_embedded_jpeg_in_tiff(&raw_buf, tiff_offset, FindJpegType::Smallest)
-                    .unwrap(),
+                find_embedded_jpeg_in_tiff(&raw_buf, tiff_offset, FindJpegType::Smallest).unwrap(),
             );
         });
-        report_stage("open + mmap + parse + extract/validate", &files, 50, |path| {
-            let file = platform::open_raw(path).unwrap();
-            let raw_buf = platform::mmap_raw(&file).unwrap();
-            let tiff_offset = find_tiff_header_offset(&raw_buf).unwrap();
-            let info = find_embedded_jpeg_in_tiff(&raw_buf, tiff_offset, FindJpegType::Smallest)
-                .unwrap()
-                .unwrap();
-            let jpeg_buf = extract_jpeg(&raw_buf, &info);
-            assert!(is_valid_jpeg(jpeg_buf));
-            std::hint::black_box(get_jpeg_data(jpeg_buf, &info));
-        });
-
+        report_stage(
+            "open + mmap + parse + extract/validate",
+            &files,
+            50,
+            |path| {
+                let file = platform::open_raw(path).unwrap();
+                let raw_buf = platform::mmap_raw(&file).unwrap();
+                let tiff_offset = find_tiff_header_offset(&raw_buf).unwrap();
+                let info =
+                    find_embedded_jpeg_in_tiff(&raw_buf, tiff_offset, FindJpegType::Smallest)
+                        .unwrap()
+                        .unwrap();
+                let jpeg_buf = extract_jpeg(&raw_buf, &info);
+                assert!(is_valid_jpeg(jpeg_buf));
+                std::hint::black_box(get_jpeg_data(jpeg_buf, &info));
+            },
+        );
     }
 
     /// Measures how end-to-end throughput scales with concurrency. Run with:
@@ -1275,6 +1317,10 @@ mod tests {
         per_iteration.sort_by(f64::total_cmp);
         let median = per_iteration[per_iteration.len() / 2];
         let min = per_iteration[0];
-        println!("{label:<55} median {:>12.3} us  min {:>12.3} us", median * 1e6, min * 1e6);
+        println!(
+            "{label:<55} median {:>12.3} us  min {:>12.3} us",
+            median * 1e6,
+            min * 1e6
+        );
     }
 }

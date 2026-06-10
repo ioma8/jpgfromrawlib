@@ -1,9 +1,10 @@
-use anyhow::{ensure, Result};
-use jpgfromraw::{process_file_bytes, FindJpegType};
+use anyhow::{Result, ensure};
+use jpgfromraw::{FindJpegType, process_file_bytes};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 struct Args {
     input_dir: PathBuf,
@@ -56,25 +57,30 @@ async fn run() -> Result<()> {
     let args = parse_args()?;
     let files = collect_raw_files(&args.input_dir)?;
     let semaphore = Arc::new(Semaphore::new(2));
-    let mut tasks = Vec::with_capacity(files.len());
+    let mut tasks = JoinSet::new();
 
     std::fs::create_dir_all(&args.output_dir)?;
 
     for file in files {
         let output_dir = args.output_dir.clone();
-        let semaphore = semaphore.clone();
-        tasks.push(tokio::spawn(async move {
-            let permit = semaphore.acquire_owned().await?;
+        let permit = semaphore.clone().acquire_owned().await?;
+        tasks.spawn(async move {
+            let _permit = permit;
             let jpeg_data = process_file_bytes(&file, FindJpegType::Smallest).await?;
             let output_path = output_path(&output_dir, &file)?;
             std::fs::write(output_path, jpeg_data)?;
-            drop(permit);
             Ok::<(), anyhow::Error>(())
-        }));
+        });
+
+        if tasks.len() >= 2
+            && let Some(task) = tasks.join_next().await
+        {
+            task??;
+        }
     }
 
-    for task in tasks {
-        task.await??;
+    while let Some(task) = tasks.join_next().await {
+        task??;
     }
 
     Ok(())

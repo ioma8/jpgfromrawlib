@@ -1,5 +1,5 @@
 use anyhow::Result;
-use jpgfromraw::parser::{process_file_bytes, FindJpegType};
+use jpgfromraw::parser::{FindJpegType, process_file_bytes};
 use std::path::Path;
 use std::time::{Duration, Instant};
 use tokio::fs;
@@ -23,7 +23,10 @@ async fn test_process_file_bytes_on_directory() -> Result<()> {
     let Some(test_raw_dir) = test_raw_dir()? else {
         return Ok(());
     };
-    assert!(Path::new(&test_raw_dir).exists(), "missing {TEST_RAW_DIR_ENV} dir");
+    assert!(
+        Path::new(&test_raw_dir).exists(),
+        "missing {TEST_RAW_DIR_ENV} dir"
+    );
 
     let mut entries = fs::read_dir(&test_raw_dir).await?;
     let mut success_count = 0;
@@ -84,7 +87,10 @@ async fn test_process_file_bytes_with_different_find_types() -> Result<()> {
     let Some(test_raw_dir) = test_raw_dir()? else {
         return Ok(());
     };
-    assert!(Path::new(&test_raw_dir).exists(), "missing {TEST_RAW_DIR_ENV} dir");
+    assert!(
+        Path::new(&test_raw_dir).exists(),
+        "missing {TEST_RAW_DIR_ENV} dir"
+    );
 
     let mut entries = fs::read_dir(&test_raw_dir).await?;
     let mut files_tested = 0;
@@ -137,7 +143,10 @@ async fn test_process_file_bytes_performance_benchmark() -> Result<()> {
     let Some(test_raw_dir) = test_raw_dir()? else {
         return Ok(());
     };
-    assert!(Path::new(&test_raw_dir).exists(), "missing {TEST_RAW_DIR_ENV} dir");
+    assert!(
+        Path::new(&test_raw_dir).exists(),
+        "missing {TEST_RAW_DIR_ENV} dir"
+    );
 
     let mut entries = fs::read_dir(&test_raw_dir).await?;
     let mut times = Vec::new();

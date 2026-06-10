@@ -1,17 +1,10 @@
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use image::codecs::jpeg::JpegEncoder;
 use image::{ExtendedColorType, ImageFormat};
-use std::ffi::{c_char, c_int, CString};
 use std::path::Path;
-use std::sync::Mutex;
+use std::process::Command;
 
 use super::temp_dir::TempDirGuard;
-
-static DCRAW_LOCK: Mutex<()> = Mutex::new(());
-
-unsafe extern "C" {
-    fn jpgfromraw_dcraw_main(argc: c_int, argv: *mut *const c_char) -> c_int;
-}
 
 pub fn decode_raw_preview(entry_path: &Path) -> Result<Vec<u8>> {
     let temp_dir = TempDirGuard::new("jpgfromraw-dcraw")?;
@@ -19,12 +12,7 @@ pub fn decode_raw_preview(entry_path: &Path) -> Result<Vec<u8>> {
     stage_input_file(entry_path, &temp_input)?;
 
     let output_path = temp_input.with_extension("ppm");
-    {
-        let _guard = DCRAW_LOCK
-            .lock()
-            .map_err(|_| anyhow::anyhow!("dcraw lock poisoned"))?;
-        run_dcraw(&temp_input)?;
-    }
+    run_dcraw(&temp_input)?;
     let ppm = std::fs::read(&output_path)
         .with_context(|| format!("Failed to read dcraw output: {}", output_path.display()))?;
     let jpeg = ppm_to_jpeg(&ppm)?;
@@ -32,24 +20,15 @@ pub fn decode_raw_preview(entry_path: &Path) -> Result<Vec<u8>> {
 }
 
 fn run_dcraw(input_path: &Path) -> Result<()> {
-    let arg0 = CString::new("dcraw")?;
-    let arg1 = CString::new("-h")?;
-    let arg2 = CString::new("-W")?;
-    let arg3 = CString::new("-o")?;
-    let arg4 = CString::new("1")?;
-    let arg5 = CString::new(input_path.as_os_str().to_string_lossy().as_bytes())?;
-    let mut argv = vec![
-        arg0.as_ptr(),
-        arg1.as_ptr(),
-        arg2.as_ptr(),
-        arg3.as_ptr(),
-        arg4.as_ptr(),
-        arg5.as_ptr(),
-        std::ptr::null(),
-    ];
-
-    let status = unsafe { jpgfromraw_dcraw_main(6, argv.as_mut_ptr()) };
-    ensure!(status == 0, "dcraw failed with status {status}");
+    let status = Command::new(env!("DCRAW_BIN"))
+        .arg("-h")
+        .arg("-W")
+        .arg("-o")
+        .arg("1")
+        .arg(input_path)
+        .status()
+        .context("Failed to launch dcraw fallback")?;
+    ensure!(status.success(), "dcraw failed with status {status}");
     Ok(())
 }
 

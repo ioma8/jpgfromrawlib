@@ -1,13 +1,14 @@
 use anyhow::{Context, Result};
 use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, ExtendedColorType, ImageFormat};
+use std::borrow::Cow;
 use std::io::Cursor;
 use std::path::Path;
 
 const JPEG_EXTENSIONS: &[&str] = &["jpg", "jpeg", "jpe", "jfif", "jps"];
 const GENERIC_EXTENSIONS: &[&str] = &[
-    "apng", "bmp", "exif", "gif", "hdr", "ico", "jfif", "jpe", "jpeg", "jpg", "jps", "pam",
-    "pbm", "pgm", "png", "pnm", "ppm", "qoi", "rgbe", "tga", "tif", "tiff", "webp",
+    "apng", "bmp", "exif", "gif", "hdr", "ico", "jfif", "jpe", "jpeg", "jpg", "jps", "pam", "pbm",
+    "pgm", "png", "pnm", "ppm", "qoi", "rgbe", "tga", "tif", "tiff", "webp",
 ];
 // Decoders for these formats are only compiled in with the generic-raster feature, so without it
 // the extensions must not be claimed: matching them would fail at decode time instead of falling
@@ -17,7 +18,10 @@ const FEATURE_GATED_EXTENSIONS: &[&str] = &["avif", "dds", "exr"];
 #[cfg(not(feature = "generic-raster"))]
 const FEATURE_GATED_EXTENSIONS: &[&str] = &[];
 
-pub fn decode_generic_raster_preview(entry_path: &Path, bytes: &[u8]) -> Result<Option<Vec<u8>>> {
+pub fn decode_generic_raster_preview<'a>(
+    entry_path: &Path,
+    bytes: &'a [u8],
+) -> Result<Option<Cow<'a, [u8]>>> {
     if bytes.is_empty() {
         return Ok(None);
     }
@@ -27,7 +31,7 @@ pub fn decode_generic_raster_preview(entry_path: &Path, bytes: &[u8]) -> Result<
     }
 
     if is_jpeg_extension(entry_path) || matches!(guess_format(bytes), Some(ImageFormat::Jpeg)) {
-        return Ok(Some(bytes.to_vec()));
+        return Ok(Some(Cow::Borrowed(bytes)));
     }
 
     let Some(format) = detect_format(entry_path, bytes) else {
@@ -37,7 +41,7 @@ pub fn decode_generic_raster_preview(entry_path: &Path, bytes: &[u8]) -> Result<
     let image = image::load_from_memory_with_format(bytes, format)
         .with_context(|| format!("failed to decode generic raster as {format:?}"))?;
     let jpeg = encode_as_jpeg(&image)?;
-    Ok(Some(jpeg))
+    Ok(Some(Cow::Owned(jpeg)))
 }
 
 pub fn is_generic_extension(entry_path: &Path) -> bool {

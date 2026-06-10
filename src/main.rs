@@ -1,13 +1,12 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use jpgfromraw::SUPPORTED_EXTENSIONS;
-use jpgfromraw::parser::process_file;
+use jpgfromraw::parser::process_file_bytes;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use tokio::fs;
-use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -20,7 +19,7 @@ struct Args {
     output_dir: PathBuf,
 
     /// How many files to process at once
-    #[arg(short, long, default_value_t = 8)]
+    #[arg(short, long, default_value_t = 8, value_parser = parse_transfers)]
     transfers: usize,
 
     /// Look for this extension in addition to the default list.
@@ -36,6 +35,16 @@ struct Args {
 struct ProcessingResult {
     result: Result<()>,
     path: PathBuf,
+}
+
+fn parse_transfers(value: &str) -> std::result::Result<usize, String> {
+    let transfers = value
+        .parse::<usize>()
+        .map_err(|err| format!("invalid transfers value: {err}"))?;
+    if transfers == 0 {
+        return Err("transfers must be at least 1".to_string());
+    }
+    Ok(transfers)
 }
 
 /// Recursively process a directory of RAW files, extracting embedded JPEGs and writing them to the
@@ -60,71 +69,59 @@ async fn process_directory(
                 .is_some_and(|extra| candidate.eq_ignore_ascii_case(extra))
     };
 
-    let mut entries = Vec::new();
     let mut dir_queue = vec![in_dir.to_path_buf()];
+    let progress_bar = ProgressBar::new_spinner();
+    progress_bar.set_style(
+        ProgressStyle::default_spinner()
+            .template("{pos} processed [{spinner}]")?
+            .progress_chars("##-"),
+    );
+
+    let mut tasks = JoinSet::new();
+    let mut nr_failed = 0;
 
     while let Some(current_dir) = dir_queue.pop() {
         let mut read_dir = fs::read_dir(&current_dir).await?;
-        let mut found_raw = false;
+        let mut output_subdir_created = false;
 
         while let Some(entry) = read_dir.next_entry().await? {
             let path = entry.path();
             if entry.file_type().await?.is_dir() {
                 dir_queue.push(path);
             } else if path.extension().is_some_and(is_valid_extension) {
-                found_raw = true;
-                entries.push(path);
+                if !output_subdir_created {
+                    let relative_dir = current_dir.strip_prefix(in_dir)?;
+                    let output_subdir = out_dir.join(relative_dir);
+                    fs::create_dir_all(&output_subdir).await?;
+                    output_subdir_created = true;
+                }
+                if tasks.len() >= transfers {
+                    collect_processing_result(
+                        tasks.join_next().await,
+                        &progress_bar,
+                        &mut nr_failed,
+                    )?;
+                }
+                let relative_path = path.strip_prefix(in_dir)?.to_path_buf();
+                let output_file = output_path(out_dir, &relative_path);
+                let task_progress_bar = progress_bar.clone();
+                tasks.spawn(async move {
+                    let result = async {
+                        let jpeg_data =
+                            process_file_bytes(&path, jpgfromraw::FindJpegType::Largest).await?;
+                        tokio::fs::write(&output_file, &jpeg_data).await?;
+                        Ok(())
+                    }
+                    .await;
+                    task_progress_bar.inc(1);
+                    Ok(ProcessingResult { result, path })
+                });
             }
         }
-
-        if found_raw {
-            let relative_dir = current_dir.strip_prefix(in_dir)?;
-            let output_subdir = out_dir.join(relative_dir);
-            fs::create_dir_all(&output_subdir).await?;
-        }
     }
 
-    let progress_bar = ProgressBar::new(entries.len().try_into()?);
-    progress_bar.set_style(
-        ProgressStyle::default_bar()
-            .template("{pos}/{len} [{bar}] (ETA: {eta})")?
-            .progress_chars("##-"),
-    );
-
-    let semaphore = Arc::new(Semaphore::new(transfers));
-    let mut tasks = Vec::with_capacity(entries.len());
-
-    for in_path in entries {
-        let semaphore = semaphore.clone();
-        let relative_path = in_path.strip_prefix(in_dir)?.to_path_buf();
-        let progress_bar = progress_bar.clone();
-        let task: tokio::task::JoinHandle<Result<ProcessingResult>> = tokio::spawn(async move {
-            let permit = semaphore.acquire_owned().await?;
-            let result = process_file(
-                &in_path,
-                out_dir,
-                &relative_path,
-                jpgfromraw::FindJpegType::Largest,
-            )
-            .await;
-            drop(permit);
-            progress_bar.inc(1);
-            Ok(ProcessingResult {
-                result,
-                path: in_path,
-            })
-        });
-        tasks.push(task);
-    }
-
-    let mut nr_failed = 0;
-    for task in tasks {
-        let pr_res = task.await??;
-        if let Err(e) = pr_res.result {
-            nr_failed += 1;
-            let msg = format!("Error processing file {}: {:?}", pr_res.path.display(), e);
-            progress_bar.println(msg);
-        }
+    while !tasks.is_empty() {
+        collect_processing_result(tasks.join_next().await, &progress_bar, &mut nr_failed)?;
     }
 
     progress_bar.abandon();
@@ -133,6 +130,29 @@ async fn process_directory(
         bail!("Failed to process {} files", nr_failed);
     }
 
+    Ok(())
+}
+
+fn output_path(out_dir: &Path, relative_path: &Path) -> PathBuf {
+    let mut output_file = out_dir.join(relative_path);
+    output_file.set_extension("jpg");
+    output_file
+}
+
+fn collect_processing_result(
+    task_result: Option<std::result::Result<Result<ProcessingResult>, tokio::task::JoinError>>,
+    progress_bar: &ProgressBar,
+    nr_failed: &mut usize,
+) -> Result<()> {
+    let Some(task_result) = task_result else {
+        return Ok(());
+    };
+    let pr_res = task_result??;
+    if let Err(e) = pr_res.result {
+        *nr_failed += 1;
+        let msg = format!("Error processing file {}: {:?}", pr_res.path.display(), e);
+        progress_bar.println(msg);
+    }
     Ok(())
 }
 
@@ -155,4 +175,15 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?
         .block_on(run(args))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_transfers;
+
+    #[test]
+    fn parse_transfers_rejects_zero() {
+        assert!(parse_transfers("0").is_err());
+        assert_eq!(parse_transfers("1").unwrap(), 1);
+    }
 }

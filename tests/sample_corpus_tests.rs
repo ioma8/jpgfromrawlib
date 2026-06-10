@@ -1,6 +1,6 @@
-use anyhow::{ensure, Context, Result};
-use jpgfromraw::{process_file_bytes, FindJpegType};
+use anyhow::{Context, Result, ensure};
 use jpgfromraw::parser::is_sof_marker;
+use jpgfromraw::{FindJpegType, process_file_bytes};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
