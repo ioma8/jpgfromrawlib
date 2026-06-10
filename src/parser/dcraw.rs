@@ -14,15 +14,17 @@ unsafe extern "C" {
 }
 
 pub fn decode_raw_preview(entry_path: &Path) -> Result<Vec<u8>> {
-    let _guard = DCRAW_LOCK
-        .lock()
-        .map_err(|_| anyhow::anyhow!("dcraw lock poisoned"))?;
     let temp_dir = TempDirGuard::new("jpgfromraw-dcraw")?;
     let temp_input = temp_dir.path().join(raw_name(entry_path)?);
     stage_input_file(entry_path, &temp_input)?;
 
     let output_path = temp_input.with_extension("ppm");
-    run_dcraw(&temp_input)?;
+    {
+        let _guard = DCRAW_LOCK
+            .lock()
+            .map_err(|_| anyhow::anyhow!("dcraw lock poisoned"))?;
+        run_dcraw(&temp_input)?;
+    }
     let ppm = std::fs::read(&output_path)
         .with_context(|| format!("Failed to read dcraw output: {}", output_path.display()))?;
     let jpeg = ppm_to_jpeg(&ppm)?;

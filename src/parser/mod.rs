@@ -816,7 +816,13 @@ pub async fn process_file_bytes(entry_path: &Path, find_type: FindJpegType) -> R
 }
 
 async fn decode_raw_preview_fallback(entry_path: &Path, raw_buf: &[u8]) -> Result<Vec<u8>> {
-    if let Some(jpeg) = generic::decode_generic_raster_preview(entry_path, raw_buf)? {
+    let generic_path = entry_path.to_path_buf();
+    let generic_bytes = raw_buf.to_vec();
+    if let Some(jpeg) = run_optional_blocking_fallback("generic raster", move || {
+        generic::decode_generic_raster_preview(&generic_path, &generic_bytes)
+    })
+    .await?
+    {
         return Ok(jpeg);
     }
 
@@ -838,6 +844,19 @@ async fn decode_raw_preview_fallback(entry_path: &Path, raw_buf: &[u8]) -> Resul
 async fn run_blocking_fallback<F>(label: &str, decode: F) -> Result<Vec<u8>>
 where
     F: FnOnce() -> Result<Vec<u8>> + Send + 'static,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => handle
+            .spawn_blocking(decode)
+            .await
+            .with_context(|| format!("{label} fallback task failed"))?,
+        Err(_) => decode(),
+    }
+}
+
+async fn run_optional_blocking_fallback<F>(label: &str, decode: F) -> Result<Option<Vec<u8>>>
+where
+    F: FnOnce() -> Result<Option<Vec<u8>>> + Send + 'static,
 {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => handle
@@ -975,5 +994,287 @@ mod tests {
         let candidate = make_test_jpeg(64)[1..].to_vec();
         assert!(candidate.starts_with(JPEG_SOI_MISSING_PREFIX));
         candidate
+    }
+
+    /// Straightforward per-SOI forward search; the production scanner must select the same
+    /// candidate.
+    fn find_by_markers_reference(
+        raw_buf: &[u8],
+        find_type: FindJpegType,
+    ) -> Option<(usize, usize)> {
+        let mut best: Option<(usize, usize)> = None;
+        let mut search_start = 0;
+        while let Some(rel) = memmem::find(&raw_buf[search_start..], JPEG_SOI_PREFIX) {
+            let jpeg_start = search_start + rel;
+            search_start = jpeg_start + JPEG_SOI_PREFIX.len();
+            let Some(rel_end) = memmem::find(&raw_buf[search_start..], JPEG_EOI) else {
+                continue;
+            };
+            let jpeg_end = search_start + rel_end + JPEG_EOI.len();
+            let len = jpeg_end - jpeg_start;
+            if is_better(len, best.map_or(0, |(_, len)| len), find_type)
+                && is_valid_jpeg(&raw_buf[jpeg_start..jpeg_end])
+            {
+                best = Some((jpeg_start, len));
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn marker_scan_matches_reference_on_randomized_buffers() {
+        let mut seed = 0x9E3779B97F4A7C15u64;
+        let mut next = move || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed
+        };
+
+        for case in 0..200 {
+            // Noise with a high density of 0xFF/0xD8/0xD9 bytes to stress marker handling.
+            let len = 200 + (next() % 2000) as usize;
+            let mut buf: Vec<u8> = (0..len)
+                .map(|_| match next() % 8 {
+                    0 => 0xFF,
+                    1 => 0xD8,
+                    2 => 0xD9,
+                    _ => (next() % 256) as u8,
+                })
+                .collect();
+            // Embed up to two valid JPEGs at random offsets.
+            for _ in 0..(next() % 3) {
+                let jpeg = make_test_jpeg(8 + (next() % 64) as usize);
+                if buf.len() > jpeg.len() {
+                    let at = (next() as usize) % (buf.len() - jpeg.len());
+                    buf[at..at + jpeg.len()].copy_from_slice(&jpeg);
+                }
+            }
+
+            for find_type in [FindJpegType::Largest, FindJpegType::Smallest] {
+                let expected = find_by_markers_reference(&buf, find_type);
+                let actual = find_embedded_jpeg_by_markers(&buf, find_type)
+                    .ok()
+                    .map(|info| (info.offset, info.length));
+                assert_eq!(actual, expected, "case {case} diverged");
+            }
+        }
+    }
+
+    /// Times each parsing stage on the real RAW corpus in test_images. Run with:
+    /// cargo test --release --lib -- --ignored parsing_performance_audit --nocapture
+    #[test]
+    #[ignore = "benchmark-style audit; run in release mode with --nocapture"]
+    fn parsing_performance_audit() {
+        let files = bench_raw_files();
+        assert!(!files.is_empty(), "no .arw files in test_images");
+
+        let buffers: Vec<Vec<u8>> = files
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect();
+
+        report_stage("find_tiff_header_offset (TIFF at 0)", &buffers, 200, |buf| {
+            std::hint::black_box(find_tiff_header_offset(buf).unwrap());
+        });
+
+        report_stage("find_embedded_jpeg_in_tiff Smallest", &buffers, 200, |buf| {
+            std::hint::black_box(
+                find_embedded_jpeg_in_tiff(buf, 0, FindJpegType::Smallest).unwrap(),
+            );
+        });
+
+        report_stage("find_embedded_jpeg_in_tiff Largest", &buffers, 200, |buf| {
+            std::hint::black_box(
+                find_embedded_jpeg_in_tiff(buf, 0, FindJpegType::Largest).unwrap(),
+            );
+        });
+
+        report_stage("validate + assemble Largest", &buffers, 50, |buf| {
+            let info = find_embedded_jpeg_in_tiff(buf, 0, FindJpegType::Largest)
+                .unwrap()
+                .unwrap();
+            let jpeg_buf = &buf[info.offset..info.offset + info.length];
+            assert!(is_valid_jpeg(jpeg_buf));
+            std::hint::black_box(get_jpeg_data(jpeg_buf, &info));
+        });
+
+        let scan_buffers = &buffers[..buffers.len().min(3)];
+        report_stage("marker scan Smallest (fallback)", scan_buffers, 5, |buf| {
+            std::hint::black_box(
+                find_embedded_jpeg_by_markers(buf, FindJpegType::Smallest).unwrap(),
+            );
+        });
+        report_stage("marker scan Largest (fallback)", scan_buffers, 5, |buf| {
+            std::hint::black_box(
+                find_embedded_jpeg_by_markers(buf, FindJpegType::Largest).unwrap(),
+            );
+        });
+        report_stage("missing-FF scan Largest (fallback)", scan_buffers, 5, |buf| {
+            std::hint::black_box(find_embedded_jpeg_missing_ff_prefix(
+                buf,
+                FindJpegType::Largest,
+            ))
+            .ok();
+        });
+
+        // RAF-like layout: no TIFF magic at offset 0, Exif APP1 near the start of the file.
+        let mut raf_like = vec![0u8; scan_buffers[0].len()];
+        raf_like[..8].copy_from_slice(b"FUJIFILM");
+        let exif_at = 1024;
+        raf_like[exif_at - 10..exif_at].copy_from_slice(&[0xFF, 0xE1, 0, 100, 0, 0, 0, 0, 0, 0]);
+        raf_like[exif_at..exif_at + EXIF_HEADER_SIZE].copy_from_slice(EXIF_HEADER);
+        raf_like[exif_at + EXIF_HEADER_SIZE..exif_at + EXIF_HEADER_SIZE + 4]
+            .copy_from_slice(TIFF_HEADER);
+        let raf_buffers = vec![raf_like];
+        report_stage(
+            "find_tiff_header_offset (Exif at 1KB, no TIFF at 0)",
+            &raf_buffers,
+            20,
+            |buf| {
+                std::hint::black_box(find_tiff_header_offset(buf).unwrap());
+            },
+        );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        report_stage("process_file_bytes Smallest (end-to-end)", &files, 50, |path| {
+            let jpeg = runtime
+                .block_on(process_file_bytes(path, FindJpegType::Smallest))
+                .unwrap();
+            std::hint::black_box(jpeg);
+        });
+        report_stage("process_file_bytes Largest (end-to-end)", &files, 50, |path| {
+            let jpeg = runtime
+                .block_on(process_file_bytes(path, FindJpegType::Largest))
+                .unwrap();
+            std::hint::black_box(jpeg);
+        });
+
+        report_stage("open only", &files, 50, |path| {
+            std::hint::black_box(platform::open_raw(path).unwrap());
+        });
+        report_stage("open + mmap + advise + drop", &files, 50, |path| {
+            let file = platform::open_raw(path).unwrap();
+            std::hint::black_box(platform::mmap_raw(&file).unwrap());
+        });
+        report_stage("open + mmap + parse (no extract)", &files, 50, |path| {
+            let file = platform::open_raw(path).unwrap();
+            let raw_buf = platform::mmap_raw(&file).unwrap();
+            let tiff_offset = find_tiff_header_offset(&raw_buf).unwrap();
+            std::hint::black_box(
+                find_embedded_jpeg_in_tiff(&raw_buf, tiff_offset, FindJpegType::Smallest)
+                    .unwrap(),
+            );
+        });
+        report_stage("open + mmap + parse + extract/validate", &files, 50, |path| {
+            let file = platform::open_raw(path).unwrap();
+            let raw_buf = platform::mmap_raw(&file).unwrap();
+            let tiff_offset = find_tiff_header_offset(&raw_buf).unwrap();
+            let info = find_embedded_jpeg_in_tiff(&raw_buf, tiff_offset, FindJpegType::Smallest)
+                .unwrap()
+                .unwrap();
+            let jpeg_buf = extract_jpeg(&raw_buf, &info);
+            assert!(is_valid_jpeg(jpeg_buf));
+            std::hint::black_box(get_jpeg_data(jpeg_buf, &info));
+        });
+
+    }
+
+    /// Measures how end-to-end throughput scales with concurrency. Run with:
+    /// cargo test --release --lib -- --ignored parallel_scaling_audit --nocapture
+    #[test]
+    #[ignore = "benchmark-style audit; run in release mode with --nocapture"]
+    fn parallel_scaling_audit() {
+        use std::sync::Arc;
+
+        let files = Arc::new(bench_raw_files());
+        assert!(!files.is_empty(), "no .arw files in test_images");
+        const ROUNDS: usize = 100;
+
+        let mut single_threaded_ops_per_sec = 0.0;
+        for workers in [1usize, 2, 4, 8] {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(workers)
+                .enable_all()
+                .build()
+                .unwrap();
+            let total_ops = ROUNDS * files.len();
+
+            // Warmup round.
+            runtime.block_on(run_rounds(Arc::clone(&files), 5, workers));
+            let start = std::time::Instant::now();
+            runtime.block_on(run_rounds(Arc::clone(&files), ROUNDS, workers));
+            let elapsed = start.elapsed().as_secs_f64();
+
+            let ops_per_sec = total_ops as f64 / elapsed;
+            if workers == 1 {
+                single_threaded_ops_per_sec = ops_per_sec;
+            }
+            println!(
+                "workers {workers:>2}: {ops_per_sec:>10.0} files/sec  (scaling x{:.2})",
+                ops_per_sec / single_threaded_ops_per_sec
+            );
+        }
+
+        async fn run_rounds(
+            files: Arc<Vec<std::path::PathBuf>>,
+            rounds: usize,
+            concurrency: usize,
+        ) {
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
+            let mut tasks = Vec::new();
+            for _ in 0..rounds {
+                for index in 0..files.len() {
+                    let files = Arc::clone(&files);
+                    let semaphore = Arc::clone(&semaphore);
+                    tasks.push(tokio::spawn(async move {
+                        let _permit = semaphore.acquire_owned().await.unwrap();
+                        let jpeg = process_file_bytes(&files[index], FindJpegType::Largest)
+                            .await
+                            .unwrap();
+                        std::hint::black_box(jpeg.len())
+                    }));
+                }
+            }
+            for task in tasks {
+                task.await.unwrap();
+            }
+        }
+    }
+
+    fn bench_raw_files() -> Vec<std::path::PathBuf> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_images");
+        let mut files: Vec<_> = std::fs::read_dir(root)
+            .map(|dir| {
+                dir.filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                    .filter(|path| {
+                        path.extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("arw"))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        files.sort();
+        files
+    }
+
+    fn report_stage<T>(label: &str, inputs: &[T], iterations: usize, mut op: impl FnMut(&T)) {
+        // Warmup.
+        for input in inputs {
+            op(input);
+        }
+        let mut per_iteration = Vec::with_capacity(iterations);
+        for _ in 0..iterations {
+            let start = std::time::Instant::now();
+            for input in inputs {
+                op(input);
+            }
+            per_iteration.push(start.elapsed().as_secs_f64() / inputs.len() as f64);
+        }
+        per_iteration.sort_by(f64::total_cmp);
+        let median = per_iteration[per_iteration.len() / 2];
+        let min = per_iteration[0];
+        println!("{label:<55} median {:>12.3} us  min {:>12.3} us", median * 1e6, min * 1e6);
     }
 }

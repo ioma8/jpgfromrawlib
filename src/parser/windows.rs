@@ -25,5 +25,16 @@ pub fn open_raw(path: &Path) -> Result<File> {
 }
 
 pub fn prefetch_jpeg(raw_buf: &Mmap, jpeg: &EmbeddedJpegInfo) {
-    let _ = (raw_buf, jpeg);
+    use windows::Win32::System::Memory::{PrefetchVirtualMemory, WIN32_MEMORY_RANGE_ENTRY};
+    use windows::Win32::System::Threading::GetCurrentProcess;
+
+    let range = WIN32_MEMORY_RANGE_ENTRY {
+        VirtualAddress: raw_buf.as_ptr().wrapping_add(jpeg.offset) as *mut core::ffi::c_void,
+        NumberOfBytes: jpeg.length,
+    };
+    // SAFETY: the range lies within the live mapping; callers validate offset and length against
+    // the map bounds before extraction. Prefetch is an optimization only; failure is harmless.
+    unsafe {
+        let _ = PrefetchVirtualMemory(GetCurrentProcess(), &[range], 0);
+    }
 }
