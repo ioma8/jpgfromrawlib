@@ -7,7 +7,7 @@ use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use windows::Win32::Storage::FileSystem::FILE_FLAG_RANDOM_ACCESS;
 
-use super::EmbeddedJpegInfo;
+use crate::parser_impl::jpeg::EmbeddedJpegInfo;
 
 pub fn mmap_raw(file: &File) -> Result<Mmap> {
     // SAFETY: see comment in unix.rs

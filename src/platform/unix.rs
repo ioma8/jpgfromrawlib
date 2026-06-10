@@ -5,7 +5,7 @@ use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
-use super::EmbeddedJpegInfo;
+use crate::parser_impl::jpeg::EmbeddedJpegInfo;
 
 pub fn mmap_raw(file: &File) -> Result<Mmap> {
     // SAFETY: mmap in general is unsafe because the lifecycle of the backing bytes are mutable

@@ -1,5 +1,4 @@
 use anyhow::{Context, Result, ensure};
-use jpgfromraw::parser::is_sof_marker;
 use jpgfromraw::{FindJpegType, process_file_bytes};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -747,4 +746,8 @@ async fn sample_corpus_performance_audit() -> Result<()> {
     }
 
     Ok(())
+}
+
+const fn is_sof_marker(marker: u8) -> bool {
+    marker >= 0xC0 && marker <= 0xCF && !matches!(marker, 0xC4 | 0xC8 | 0xCC)
 }

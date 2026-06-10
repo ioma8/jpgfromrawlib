@@ -2,9 +2,10 @@ use anyhow::{Result, bail};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use jpgfromraw::SUPPORTED_EXTENSIONS;
-use jpgfromraw::parser::process_file_bytes;
+use jpgfromraw::process_file;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::fs;
 use tokio::task::JoinSet;
 
@@ -56,7 +57,7 @@ fn parse_transfers(value: &str) -> std::result::Result<usize, String> {
 /// maintained.
 async fn process_directory(
     in_dir: &Path,
-    out_dir: &'static Path,
+    out_dir: Arc<PathBuf>,
     ext: Option<OsString>,
     transfers: usize,
 ) -> Result<()> {
@@ -82,19 +83,12 @@ async fn process_directory(
 
     while let Some(current_dir) = dir_queue.pop() {
         let mut read_dir = fs::read_dir(&current_dir).await?;
-        let mut output_subdir_created = false;
 
         while let Some(entry) = read_dir.next_entry().await? {
             let path = entry.path();
             if entry.file_type().await?.is_dir() {
                 dir_queue.push(path);
             } else if path.extension().is_some_and(is_valid_extension) {
-                if !output_subdir_created {
-                    let relative_dir = current_dir.strip_prefix(in_dir)?;
-                    let output_subdir = out_dir.join(relative_dir);
-                    fs::create_dir_all(&output_subdir).await?;
-                    output_subdir_created = true;
-                }
                 if tasks.len() >= transfers {
                     collect_processing_result(
                         tasks.join_next().await,
@@ -103,13 +97,17 @@ async fn process_directory(
                     )?;
                 }
                 let relative_path = path.strip_prefix(in_dir)?.to_path_buf();
-                let output_file = output_path(out_dir, &relative_path);
                 let task_progress_bar = progress_bar.clone();
+                let out_dir = Arc::clone(&out_dir);
                 tasks.spawn(async move {
                     let result = async {
-                        let jpeg_data =
-                            process_file_bytes(&path, jpgfromraw::FindJpegType::Largest).await?;
-                        tokio::fs::write(&output_file, &jpeg_data).await?;
+                        process_file(
+                            &path,
+                            out_dir.as_path(),
+                            &relative_path,
+                            jpgfromraw::FindJpegType::Largest,
+                        )
+                        .await?;
                         Ok(())
                     }
                     .await;
@@ -133,12 +131,6 @@ async fn process_directory(
     Ok(())
 }
 
-fn output_path(out_dir: &Path, relative_path: &Path) -> PathBuf {
-    let mut output_file = out_dir.join(relative_path);
-    output_file.set_extension("jpg");
-    output_file
-}
-
 fn collect_processing_result(
     task_result: Option<std::result::Result<Result<ProcessingResult>, tokio::task::JoinError>>,
     progress_bar: &ProgressBar,
@@ -157,10 +149,9 @@ fn collect_processing_result(
 }
 
 async fn run(args: Args) -> Result<()> {
-    // We would need a copy for each task otherwise, so better just to make it &'static
-    let output_dir = Box::leak(Box::new(args.output_dir));
+    let output_dir = Arc::new(args.output_dir);
 
-    fs::create_dir_all(&output_dir).await?;
+    fs::create_dir_all(output_dir.as_path()).await?;
     process_directory(&args.input_dir, output_dir, args.extension, args.transfers).await?;
 
     Ok(())
