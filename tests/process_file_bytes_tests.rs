@@ -12,18 +12,20 @@ fn file_name_display(path: &Path) -> String {
 }
 
 /// Path to a directory containing test RAW files
-const TEST_RAW_DIR: &str = "/Users/jakubkolcar/Pictures/2024/2024-12-24";
+const TEST_RAW_DIR_ENV: &str = "JPGFROMRAW_TEST_DIR";
+
+fn test_raw_dir() -> Result<Option<std::path::PathBuf>> {
+    Ok(std::env::var_os(TEST_RAW_DIR_ENV).map(Into::into))
+}
 
 #[tokio::test]
 async fn test_process_file_bytes_on_directory() -> Result<()> {
-    // Ensure the test directory exists
-    if !Path::new(TEST_RAW_DIR).exists() {
-        eprintln!("Test directory not found: {TEST_RAW_DIR}");
-        eprintln!("Please create this directory with some RAW files for testing");
+    let Some(test_raw_dir) = test_raw_dir()? else {
         return Ok(());
-    }
+    };
+    assert!(Path::new(&test_raw_dir).exists(), "missing {TEST_RAW_DIR_ENV} dir");
 
-    let mut entries = fs::read_dir(TEST_RAW_DIR).await?;
+    let mut entries = fs::read_dir(&test_raw_dir).await?;
     let mut success_count = 0;
     let mut failure_count = 0;
     let mut total_size = 0;
@@ -72,19 +74,19 @@ async fn test_process_file_bytes_on_directory() -> Result<()> {
         println!("⚠️  Warning: Some files failed to process");
     }
 
+    assert_eq!(failure_count, 0, "some files failed to process");
+    assert!(success_count > 0, "no files processed");
     Ok(())
 }
 
 #[tokio::test]
 async fn test_process_file_bytes_with_different_find_types() -> Result<()> {
-    // Ensure the test directory exists
-    if !Path::new(TEST_RAW_DIR).exists() {
-        eprintln!("Test directory not found: {TEST_RAW_DIR}");
-        eprintln!("Please create this directory with some RAW files for testing");
+    let Some(test_raw_dir) = test_raw_dir()? else {
         return Ok(());
-    }
+    };
+    assert!(Path::new(&test_raw_dir).exists(), "missing {TEST_RAW_DIR_ENV} dir");
 
-    let mut entries = fs::read_dir(TEST_RAW_DIR).await?;
+    let mut entries = fs::read_dir(&test_raw_dir).await?;
     let mut files_tested = 0;
 
     // Test only first 5 files to keep the test run time reasonable
@@ -109,18 +111,16 @@ async fn test_process_file_bytes_with_different_find_types() -> Result<()> {
                 match process_file_bytes(&path, FindJpegType::Smallest).await {
                     Ok(smallest_jpeg) => {
                         println!("Smallest JPEG size: {} bytes", smallest_jpeg.len());
-
-                        // Verify the types work as expected
-                        if largest_jpeg.len() >= smallest_jpeg.len() {
-                            println!("✅ Verified: Largest >= Smallest");
-                        } else {
-                            println!("❌ Error: Largest < Smallest");
-                        }
+                        assert!(
+                            largest_jpeg.len() >= smallest_jpeg.len(),
+                            "Largest < Smallest for {}",
+                            path.display()
+                        );
                     }
-                    Err(e) => println!("❌ Failed to get smallest JPEG: {e}"),
+                    Err(e) => panic!("Failed to get smallest JPEG for {}: {e}", path.display()),
                 }
             }
-            Err(e) => println!("❌ Failed to get largest JPEG: {e}"),
+            Err(e) => panic!("Failed to get largest JPEG for {}: {e}", path.display()),
         }
 
         files_tested += 1;
@@ -134,14 +134,12 @@ async fn test_process_file_bytes_with_different_find_types() -> Result<()> {
 
 #[tokio::test]
 async fn test_process_file_bytes_performance_benchmark() -> Result<()> {
-    // Ensure the test directory exists
-    if !Path::new(TEST_RAW_DIR).exists() {
-        eprintln!("Test directory not found: {TEST_RAW_DIR}");
-        eprintln!("Please create this directory with some RAW files for testing");
+    let Some(test_raw_dir) = test_raw_dir()? else {
         return Ok(());
-    }
+    };
+    assert!(Path::new(&test_raw_dir).exists(), "missing {TEST_RAW_DIR_ENV} dir");
 
-    let mut entries = fs::read_dir(TEST_RAW_DIR).await?;
+    let mut entries = fs::read_dir(&test_raw_dir).await?;
     let mut times = Vec::new();
     let mut sizes = Vec::new();
     let mut count = 0;
@@ -197,5 +195,6 @@ async fn test_process_file_bytes_performance_benchmark() -> Result<()> {
         println!("  Throughput: {throughput_mib_s:.2} MB/s");
     }
 
+    assert!(!times.is_empty(), "no files were successfully processed");
     Ok(())
 }

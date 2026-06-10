@@ -3,11 +3,10 @@ use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use jpgfromraw::SUPPORTED_EXTENSIONS;
 use jpgfromraw::parser::process_file;
-use std::collections::HashSet;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::fs::{self};
+use tokio::fs;
 use tokio::sync::Semaphore;
 
 #[derive(Parser)]
@@ -52,11 +51,14 @@ async fn process_directory(
     ext: Option<OsString>,
     transfers: usize,
 ) -> Result<()> {
-    let valid_extensions = SUPPORTED_EXTENSIONS
-    .iter()
-    .flat_map(|&ext| [OsString::from(ext), OsString::from(ext.to_uppercase())])
-    .chain(ext.into_iter())
-    .collect::<HashSet<_>>();
+    let is_valid_extension = |candidate: &OsStr| {
+        SUPPORTED_EXTENSIONS
+            .iter()
+            .any(|supported| candidate.eq_ignore_ascii_case(supported))
+            || ext
+                .as_deref()
+                .is_some_and(|extra| candidate.eq_ignore_ascii_case(extra))
+    };
 
     let mut entries = Vec::new();
     let mut dir_queue = vec![in_dir.to_path_buf()];
@@ -69,10 +71,7 @@ async fn process_directory(
             let path = entry.path();
             if entry.file_type().await?.is_dir() {
                 dir_queue.push(path);
-            } else if path
-                .extension()
-                .is_some_and(|ext| valid_extensions.contains(ext))
-            {
+            } else if path.extension().is_some_and(is_valid_extension) {
                 found_raw = true;
                 entries.push(path);
             }

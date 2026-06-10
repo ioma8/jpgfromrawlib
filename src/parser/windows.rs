@@ -16,15 +16,14 @@ pub fn mmap_raw(file: &File) -> Result<Mmap> {
 }
 
 pub fn open_raw(path: &Path) -> Result<File> {
-    // There's no MADV_RANDOM equivalent, we have to do it at open time. See unix.rs for why we do
-    // this in general.
+    // There's no MADV_RANDOM equivalent we can apply to the mapping, so request random access at
+    // open time instead. See mmap_raw in unix.rs for why we advise random access in general.
     Ok(OpenOptions::new()
         .read(true)
         .custom_flags(FILE_FLAG_RANDOM_ACCESS.0)
         .open(path)?)
 }
 
-pub fn prefetch_jpeg(raw_buf: &Mmap, jpeg: &EmbeddedJpegInfo) -> Result<()> {
+pub fn prefetch_jpeg(raw_buf: &Mmap, jpeg: &EmbeddedJpegInfo) {
     let _ = (raw_buf, jpeg);
-    Ok(())
 }

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use memmap2::Advice;
 use memmap2::Mmap;
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
@@ -19,6 +20,9 @@ pub fn mmap_raw(file: &File) -> Result<Mmap> {
     // (and thus UB). However, in our case, that's not a problem: we don't rely on such
     // enforcement.
     let raw_buf = unsafe { Mmap::map(file.as_raw_fd())? };
+    // We only touch the IFD chain and the embedded JPEG range, so disabling readahead avoids
+    // paging in megabytes we never read. Advice is an optimization only; failure is harmless.
+    let _ = raw_buf.advise(Advice::Random);
     Ok(raw_buf)
 }
 
@@ -26,7 +30,7 @@ pub fn open_raw(path: &Path) -> Result<File> {
     Ok(File::open(path)?)
 }
 
-pub fn prefetch_jpeg(raw_buf: &Mmap, jpeg: &EmbeddedJpegInfo) -> Result<()> {
-    let _ = (raw_buf, jpeg);
-    Ok(())
+pub fn prefetch_jpeg(raw_buf: &Mmap, jpeg: &EmbeddedJpegInfo) {
+    // Advice is an optimization only; failure is harmless.
+    let _ = raw_buf.advise_range(Advice::WillNeed, jpeg.offset, jpeg.length);
 }

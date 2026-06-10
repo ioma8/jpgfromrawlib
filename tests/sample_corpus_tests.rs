@@ -1,5 +1,6 @@
 use anyhow::{ensure, Context, Result};
 use jpgfromraw::{process_file_bytes, FindJpegType};
+use jpgfromraw::parser::is_sof_marker;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -619,21 +620,7 @@ fn decode_jpeg(bytes: &[u8]) -> Result<()> {
         let segment_end = cursor + segment_len;
         ensure!(segment_end <= bytes.len(), "JPEG segment exceeds buffer");
 
-        let is_sof = matches!(
-            marker,
-            0xC0 | 0xC1
-                | 0xC2
-                | 0xC3
-                | 0xC5
-                | 0xC6
-                | 0xC7
-                | 0xC9
-                | 0xCA
-                | 0xCB
-                | 0xCD
-                | 0xCE
-                | 0xCF
-        );
+        let is_sof = is_sof_marker(marker);
         if is_sof {
             ensure!(segment_end - segment_start >= 6, "truncated SOF segment");
             let precision = bytes[segment_start];
@@ -652,8 +639,24 @@ fn decode_jpeg(bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// The corpus is too large to commit, so these tests only run on machines that have downloaded
+/// it; see SAMPLE_CASES for the source URLs.
+fn corpus_available() -> bool {
+    if sample_root().exists() {
+        return true;
+    }
+    eprintln!(
+        "skipping: sample corpus not present at {}",
+        sample_root().display()
+    );
+    false
+}
+
 #[tokio::test]
 async fn sample_corpus_files_exist() -> Result<()> {
+    if !corpus_available() {
+        return Ok(());
+    }
     for case in SAMPLE_CASES {
         let path = sample_path(case);
         ensure!(
@@ -670,6 +673,9 @@ async fn sample_corpus_files_exist() -> Result<()> {
 
 #[tokio::test]
 async fn sample_corpus_extracts_valid_smallest_jpegs() -> Result<()> {
+    if !corpus_available() {
+        return Ok(());
+    }
     for case in SAMPLE_CASES {
         let path = sample_path(case);
         let jpeg = process_file_bytes(&path, FindJpegType::Smallest)
@@ -684,6 +690,9 @@ async fn sample_corpus_extracts_valid_smallest_jpegs() -> Result<()> {
 
 #[tokio::test]
 async fn sample_corpus_extracts_valid_largest_jpegs() -> Result<()> {
+    if !corpus_available() {
+        return Ok(());
+    }
     for case in SAMPLE_CASES {
         let path = sample_path(case);
         let jpeg = process_file_bytes(&path, FindJpegType::Largest)
@@ -698,6 +707,9 @@ async fn sample_corpus_extracts_valid_largest_jpegs() -> Result<()> {
 
 #[tokio::test]
 async fn sample_corpus_largest_is_not_smaller_than_smallest() -> Result<()> {
+    if !corpus_available() {
+        return Ok(());
+    }
     for case in SAMPLE_CASES {
         let path = sample_path(case);
         let smallest = process_file_bytes(&path, FindJpegType::Smallest).await?;
