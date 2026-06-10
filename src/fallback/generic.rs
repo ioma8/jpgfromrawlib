@@ -5,7 +5,6 @@ use std::borrow::Cow;
 use std::io::Cursor;
 use std::path::Path;
 
-const JPEG_EXTENSIONS: &[&str] = &["jpg", "jpeg", "jpe", "jfif", "jps"];
 const GENERIC_EXTENSIONS: &[&str] = &[
     "apng", "bmp", "exif", "gif", "hdr", "ico", "jfif", "jpe", "jpeg", "jpg", "jps", "pam", "pbm",
     "pgm", "png", "pnm", "ppm", "qoi", "rgbe", "tga", "tif", "tiff", "webp",
@@ -30,13 +29,12 @@ pub fn decode_generic_raster_preview<'a>(
         return Ok(None);
     }
 
-    if is_jpeg_extension(entry_path) || matches!(guess_format(bytes), Some(ImageFormat::Jpeg)) {
-        return Ok(Some(Cow::Borrowed(bytes)));
-    }
-
     let Some(format) = detect_format(entry_path, bytes) else {
         return Ok(None);
     };
+    if matches!(format, ImageFormat::Jpeg) {
+        return Ok(Some(Cow::Borrowed(bytes)));
+    }
 
     let image = image::load_from_memory_with_format(bytes, format)
         .with_context(|| format!("failed to decode generic raster as {format:?}"))?;
@@ -87,21 +85,20 @@ fn guess_format(bytes: &[u8]) -> Option<ImageFormat> {
     image::guess_format(bytes).ok()
 }
 
-fn is_jpeg_extension(entry_path: &Path) -> bool {
-    has_extension(entry_path, JPEG_EXTENSIONS)
-}
-
 fn has_extension(entry_path: &Path, known_extensions: &[&str]) -> bool {
     entry_path
         .extension()
         .and_then(|ext| ext.to_str())
-        .map(|ext| known_extensions.contains(&ext.to_ascii_lowercase().as_str()))
-        .unwrap_or(false)
+        .is_some_and(|ext| {
+            known_extensions
+                .iter()
+                .any(|known| ext.eq_ignore_ascii_case(known))
+        })
 }
 
 fn encode_as_jpeg(image: &DynamicImage) -> Result<Vec<u8>> {
     let rgb = image.to_rgb8();
-    let mut output = Vec::new();
+    let mut output = Vec::with_capacity(super::jpeg_output_capacity(rgb.as_raw().len()));
     let mut cursor = Cursor::new(&mut output);
     let mut encoder = JpegEncoder::new_with_quality(&mut cursor, 95);
     encoder.encode(

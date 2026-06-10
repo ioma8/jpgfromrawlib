@@ -36,7 +36,7 @@ fn ppm_to_jpeg(ppm: &[u8]) -> Result<Vec<u8>> {
     let image = image::load_from_memory_with_format(ppm, ImageFormat::Pnm)
         .context("Failed to decode dcraw PPM output")?;
     let rgb = image.into_rgb8();
-    let mut jpeg = Vec::new();
+    let mut jpeg = Vec::with_capacity(super::jpeg_output_capacity(rgb.as_raw().len()));
     let mut encoder = JpegEncoder::new_with_quality(&mut jpeg, 95);
     encoder
         .encode(
