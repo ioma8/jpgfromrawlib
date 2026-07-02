@@ -11,14 +11,17 @@ use super::is_better;
 use super::jpeg::{EmbeddedJpegInfo, get_jpeg_data};
 
 pub(crate) const TIFF_HEADER: &[u8; 4] = b"II*\0";
+const TIFF_HEADER_RW2: &[u8; 4] = b"IIU\0";
 pub(crate) const TIFF_HEADERMM: &[u8; 4] = b"MM\0*";
 pub(crate) const EXIF_HEADER: &[u8; 6] = b"Exif\0\0";
 pub(crate) const EXIF_HEADER_SIZE: usize = 6;
 const EXIF_TIFF_SEARCH_WINDOW: usize = 10;
+const EXIF_SEARCH_CAP: usize = 256 * 1024;
 const IFD_ENTRY_SIZE: usize = 12;
 const MAX_IFD_CHAIN_LEN: usize = 64;
 const JPEG_TAG: u16 = 0x201;
 const JPEG_LENGTH_TAG: u16 = 0x202;
+const TAG_JPG_FROM_RAW: u16 = 0x2E;
 const TAG_IMAGE_WIDTH: u16 = 0x100;
 const TAG_IMAGE_LENGTH: u16 = 0x101;
 const TAG_BITS_PER_SAMPLE: u16 = 0x102;
@@ -29,6 +32,7 @@ const TAG_ORIENTATION: u16 = 0x112;
 const TAG_SAMPLES_PER_PIXEL: u16 = 0x115;
 const TAG_ROWS_PER_STRIP: u16 = 0x116;
 const TAG_STRIP_BYTE_COUNTS: u16 = 0x117;
+const TAG_SUB_IFDS: u16 = 0x14A;
 
 #[derive(Debug, Default)]
 pub(crate) struct TiffPreviewInfo {
@@ -153,11 +157,15 @@ pub(crate) fn find_tiff_header_offset(raw_buf: &[u8]) -> Result<usize> {
         "Not enough data for TIFF header"
     );
 
-    if raw_buf.starts_with(TIFF_HEADER) || raw_buf.starts_with(TIFF_HEADERMM) {
+    if raw_buf.starts_with(TIFF_HEADER)
+        || raw_buf.starts_with(TIFF_HEADER_RW2)
+        || raw_buf.starts_with(TIFF_HEADERMM)
+    {
         return Ok(0);
     }
 
-    let found = memmem::find(raw_buf, EXIF_HEADER);
+    let head = &raw_buf[..raw_buf.len().min(EXIF_SEARCH_CAP)];
+    let found = memmem::find(head, EXIF_HEADER);
     if let Some(pos) = found {
         if pos < 10 {
             return Err(anyhow::anyhow!("Invalid Exif header position: {}", pos));
@@ -198,15 +206,18 @@ pub(crate) fn find_embedded_jpeg_in_tiff(
 ) -> Result<Option<EmbeddedJpegInfo>> {
     let raw_buf = &raw_buf[tiff_offset..];
     let reader = tiff_reader(raw_buf)?;
-    let mut next_ifd_offset = usize::try_from(reader.read_u32(&raw_buf[4..8]))?;
+    let mut pending = vec![usize::try_from(reader.read_u32(&raw_buf[4..8]))?];
     let mut best: Option<EmbeddedJpegInfo> = None;
     let mut chain_guard = IfdChainGuard::new();
 
-    while next_ifd_offset != 0 {
-        chain_guard.visit(next_ifd_offset)?;
-        ensure!(next_ifd_offset + 2 <= raw_buf.len(), "Invalid IFD offset");
+    while let Some(ifd_offset) = pending.pop() {
+        if ifd_offset == 0 {
+            continue;
+        }
+        chain_guard.visit(ifd_offset)?;
+        ensure!(ifd_offset + 2 <= raw_buf.len(), "Invalid IFD offset");
 
-        let cursor = &raw_buf[next_ifd_offset..];
+        let cursor = &raw_buf[ifd_offset..];
         let num_entries = usize::from(reader.read_u16(&cursor[..2]));
         let entries_cursor = &cursor[2..];
         let entries_len = num_entries * IFD_ENTRY_SIZE;
@@ -226,6 +237,7 @@ pub(crate) fn find_embedded_jpeg_in_tiff(
             .take(num_entries)
         {
             let tag = reader.read_u16(&entry[..2]);
+            let type_id = reader.read_u16(&entry[2..4]);
             let count = reader.read_u32(&entry[4..8]);
 
             match tag {
@@ -233,9 +245,28 @@ pub(crate) fn find_embedded_jpeg_in_tiff(
                     cur_offset = Some(reader.read_u32(&entry[8..12]).try_into()?);
                     cur_offset_is_strip = false;
                 }
+                TAG_JPG_FROM_RAW => {
+                    let offset = usize::try_from(reader.read_u32(&entry[8..12]))?;
+                    let length = usize::try_from(count)?;
+                    if raw_buf.get(offset..offset + 3) == Some(b"\xFF\xD8\xFF") {
+                        cur_offset = Some(offset);
+                        cur_length = Some(length);
+                        cur_offset_is_strip = false;
+                        cur_length_is_strip = false;
+                    }
+                }
                 JPEG_LENGTH_TAG => {
                     cur_length = Some(reader.read_u32(&entry[8..12]).try_into()?);
                     cur_length_is_strip = false;
+                }
+                TAG_SUB_IFDS => {
+                    if let Ok(values) = reader.read_u32_values(type_id, count, &entry[8..12]) {
+                        for sub in values {
+                            if let Ok(sub) = usize::try_from(sub) {
+                                pending.push(sub);
+                            }
+                        }
+                    }
                 }
                 TAG_STRIP_OFFSETS if count == 1 => {
                     cur_offset = Some(reader.read_u32(&entry[8..12]).try_into()?);
@@ -261,7 +292,6 @@ pub(crate) fn find_embedded_jpeg_in_tiff(
                 if is_better(length, best.map_or(0, |jpeg| jpeg.length), find_type) {
                     best = Some(EmbeddedJpegInfo::new(offset, length, cur_orientation));
                 }
-                break;
             }
         }
 
@@ -270,9 +300,11 @@ pub(crate) fn find_embedded_jpeg_in_tiff(
             cursor.len() >= next_ifd_offset_offset + 4,
             "Invalid next IFD offset"
         );
-        next_ifd_offset = reader
-            .read_u32(&cursor[next_ifd_offset_offset..][..4])
-            .try_into()?;
+        pending.push(
+            reader
+                .read_u32(&cursor[next_ifd_offset_offset..][..4])
+                .try_into()?,
+        );
     }
 
     if let Some(best) = best {
@@ -475,7 +507,7 @@ pub(crate) fn try_tiff_preview(
 
 fn tiff_reader(raw_buf: &[u8]) -> Result<TiffReader<'_>> {
     ensure!(raw_buf.len() >= 8, "Not enough data for TIFF header");
-    let is_le = raw_buf.starts_with(TIFF_HEADER);
+    let is_le = raw_buf.starts_with(TIFF_HEADER) || raw_buf.starts_with(TIFF_HEADER_RW2);
     ensure!(
         is_le || raw_buf.starts_with(TIFF_HEADERMM),
         "Not a valid TIFF file"

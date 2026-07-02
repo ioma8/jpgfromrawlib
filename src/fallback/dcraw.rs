@@ -11,12 +11,43 @@ pub fn decode_raw_preview(entry_path: &Path) -> Result<Vec<u8>> {
     let temp_input = temp_dir.path().join(raw_name(entry_path)?);
     stage_input_file(entry_path, &temp_input)?;
 
+    if let Some(jpeg) = try_dcraw_thumbnail(&temp_input)? {
+        return Ok(jpeg);
+    }
+
     let output_path = temp_input.with_extension("ppm");
     run_dcraw(&temp_input)?;
     let ppm = std::fs::read(&output_path)
         .with_context(|| format!("Failed to read dcraw output: {}", output_path.display()))?;
     let jpeg = ppm_to_jpeg(&ppm)?;
     Ok(jpeg)
+}
+
+fn try_dcraw_thumbnail(temp_input: &Path) -> Result<Option<Vec<u8>>> {
+    let status = Command::new(env!("DCRAW_BIN"))
+        .arg("-e")
+        .arg(temp_input)
+        .status();
+    if !matches!(status, Ok(status) if status.success()) {
+        return Ok(None);
+    }
+
+    for (ext, is_jpeg) in [("thumb.jpg", true), ("thumb.ppm", false)] {
+        let path = temp_input.with_extension(ext);
+        if let Ok(bytes) = std::fs::read(&path) {
+            return if is_jpeg {
+                Ok(is_complete_jpeg(&bytes).then_some(bytes))
+            } else {
+                Ok(Some(ppm_to_jpeg(&bytes)?))
+            };
+        }
+    }
+
+    Ok(None)
+}
+
+fn is_complete_jpeg(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0xFF, 0xD8]) && bytes.ends_with(&[0xFF, 0xD9])
 }
 
 fn run_dcraw(input_path: &Path) -> Result<()> {

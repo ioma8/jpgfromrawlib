@@ -1,4 +1,5 @@
 use anyhow::Result;
+use byteorder::{BigEndian, ByteOrder};
 use memchr::memmem;
 use memmap2::Mmap;
 
@@ -231,4 +232,17 @@ pub(crate) fn try_missing_ff(raw_buf: &[u8], find_type: FindJpegType) -> Option<
         &jpeg_buf,
         &EmbeddedJpegInfo::new(0, jpeg_buf.len(), None),
     ))
+}
+
+pub(crate) fn find_raf_jpeg(raw_buf: &[u8]) -> Option<EmbeddedJpegInfo> {
+    if !raw_buf.starts_with(b"FUJIFILMCCD-RAW") || raw_buf.len() < 92 {
+        return None;
+    }
+    let offset = usize::try_from(BigEndian::read_u32(&raw_buf[84..88])).ok()?;
+    let length = usize::try_from(BigEndian::read_u32(&raw_buf[88..92])).ok()?;
+    let end = offset.checked_add(length)?;
+    if end > raw_buf.len() || !raw_buf[offset..].starts_with(JPEG_SOI_PREFIX) {
+        return None;
+    }
+    Some(EmbeddedJpegInfo::new(offset, length, None))
 }

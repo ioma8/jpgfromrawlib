@@ -11,6 +11,7 @@ fn is_better(candidate: usize, best: usize, find_type: FindJpegType) -> bool {
 
 use crate::fallback;
 use crate::platform;
+pub(crate) mod bmff;
 pub(crate) mod jpeg;
 pub(crate) mod tiff;
 
@@ -21,13 +22,15 @@ pub(crate) async fn process_file_bytes(
     let in_file = platform::open_raw(entry_path)?;
     let raw_buf = platform::mmap_raw(&in_file)?;
     let tiff_offset = tiff::find_tiff_header_offset(&raw_buf).ok();
-    let jpeg_info = match tiff_offset {
-        Some(tiff_offset) => tiff::find_embedded_jpeg_in_tiff(&raw_buf, tiff_offset, find_type)
-            .ok()
-            .flatten()
-            .or_else(|| jpeg::find_embedded_jpeg_by_markers(&raw_buf, find_type).ok()),
-        None => jpeg::find_embedded_jpeg_by_markers(&raw_buf, find_type).ok(),
-    };
+    let jpeg_info = bmff::find_cr3_preview(&raw_buf, find_type)
+        .or_else(|| jpeg::find_raf_jpeg(&raw_buf))
+        .or_else(|| match tiff_offset {
+            Some(tiff_offset) => tiff::find_embedded_jpeg_in_tiff(&raw_buf, tiff_offset, find_type)
+                .ok()
+                .flatten()
+                .or_else(|| jpeg::find_embedded_jpeg_by_markers(&raw_buf, find_type).ok()),
+            None => jpeg::find_embedded_jpeg_by_markers(&raw_buf, find_type).ok(),
+        });
 
     if let Some(jpeg_info) = jpeg_info {
         let jpeg_buf = jpeg::extract_jpeg(&raw_buf, &jpeg_info);
@@ -50,8 +53,8 @@ pub(crate) async fn process_file_bytes(
 mod tests {
     use super::jpeg::{
         JPEG_EOI, JPEG_SOI_MISSING_PREFIX, JPEG_SOI_PREFIX, extract_jpeg,
-        find_embedded_jpeg_by_markers, find_embedded_jpeg_missing_ff_prefix, get_jpeg_data,
-        is_valid_jpeg,
+        find_embedded_jpeg_by_markers, find_embedded_jpeg_missing_ff_prefix, find_raf_jpeg,
+        get_jpeg_data, is_valid_jpeg,
     };
     use super::tiff::{
         EXIF_HEADER, EXIF_HEADER_SIZE, TIFF_HEADER, find_embedded_jpeg_in_tiff,
@@ -66,6 +69,140 @@ mod tests {
             let buf = vec![0u8; len];
             assert!(find_tiff_header_offset(&buf).is_err());
         }
+    }
+
+    #[test]
+    fn exif_search_is_bounded_to_file_head() {
+        let mut buf = vec![0u8; 2 * 1024 * 1024];
+        let far = 1024 * 1024;
+        buf[far..far + EXIF_HEADER_SIZE].copy_from_slice(EXIF_HEADER);
+        assert!(find_tiff_header_offset(&buf).is_err());
+
+        let mut buf = vec![0u8; 2 * 1024 * 1024];
+        let near = 4096;
+        buf[near..near + EXIF_HEADER_SIZE].copy_from_slice(EXIF_HEADER);
+        buf[near + EXIF_HEADER_SIZE..near + EXIF_HEADER_SIZE + 4].copy_from_slice(TIFF_HEADER);
+        assert_eq!(
+            find_tiff_header_offset(&buf).unwrap(),
+            near + EXIF_HEADER_SIZE
+        );
+    }
+
+    #[test]
+    fn tiff_sub_ifd_jpeg_is_found() {
+        let jpeg = make_test_jpeg(32);
+        let jpeg_offset = 80usize;
+        let sub_ifd_offset = 40usize;
+        let mut buf = le_tiff(8);
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        tiff_entry(&mut buf, 0x14A, 4, 1, sub_ifd_offset as u32);
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.resize(sub_ifd_offset, 0);
+        buf.extend_from_slice(&2u16.to_le_bytes());
+        tiff_entry(&mut buf, 0x201, 4, 1, jpeg_offset as u32);
+        tiff_entry(&mut buf, 0x202, 4, 1, jpeg.len() as u32);
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.resize(jpeg_offset, 0);
+        buf.extend_from_slice(&jpeg);
+
+        let found = find_embedded_jpeg_in_tiff(&buf, 0, FindJpegType::Largest)
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.offset, jpeg_offset);
+        assert_eq!(found.length, jpeg.len());
+    }
+
+    #[test]
+    fn rw2_jpg_from_raw_tag_is_found() {
+        let jpeg = make_test_jpeg(32);
+        let jpeg_offset = 40usize;
+        let mut buf = le_tiff_with_header(b"IIU\0", 8);
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        tiff_entry(&mut buf, 0x2E, 7, jpeg.len() as u32, jpeg_offset as u32);
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.resize(jpeg_offset, 0);
+        buf.extend_from_slice(&jpeg);
+
+        let found = find_embedded_jpeg_in_tiff(&buf, 0, FindJpegType::Largest)
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.offset, jpeg_offset);
+        assert_eq!(found.length, jpeg.len());
+        assert_eq!(find_tiff_header_offset(&buf).unwrap(), 0);
+    }
+
+    #[test]
+    fn unsupported_sub_ifd_type_does_not_abort_tiff_walk() {
+        let jpeg = make_test_jpeg(32);
+        let jpeg_offset = 64usize;
+        let next_ifd_offset = 32usize;
+        let mut buf = le_tiff(8);
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        tiff_entry(&mut buf, 0x14A, 13, 1, 0);
+        buf.extend_from_slice(&(next_ifd_offset as u32).to_le_bytes());
+        buf.resize(next_ifd_offset, 0);
+        buf.extend_from_slice(&2u16.to_le_bytes());
+        tiff_entry(&mut buf, 0x201, 4, 1, jpeg_offset as u32);
+        tiff_entry(&mut buf, 0x202, 4, 1, jpeg.len() as u32);
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.resize(jpeg_offset, 0);
+        buf.extend_from_slice(&jpeg);
+
+        let found = find_embedded_jpeg_in_tiff(&buf, 0, FindJpegType::Largest)
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.offset, jpeg_offset);
+        assert_eq!(found.length, jpeg.len());
+    }
+
+    #[test]
+    fn largest_tiff_preview_still_checks_sub_ifds_after_small_strip_preview() {
+        let small = make_test_jpeg(16);
+        let large = make_test_jpeg(64);
+        let small_offset = 96usize;
+        let large_offset = small_offset + small.len();
+        let sub_ifd_offset = 56usize;
+        let mut buf = le_tiff(8);
+        buf.extend_from_slice(&3u16.to_le_bytes());
+        tiff_entry(&mut buf, 0x111, 4, 1, small_offset as u32);
+        tiff_entry(&mut buf, 0x117, 4, 1, small.len() as u32);
+        tiff_entry(&mut buf, 0x14A, 4, 1, sub_ifd_offset as u32);
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.resize(sub_ifd_offset, 0);
+        buf.extend_from_slice(&2u16.to_le_bytes());
+        tiff_entry(&mut buf, 0x201, 4, 1, large_offset as u32);
+        tiff_entry(&mut buf, 0x202, 4, 1, large.len() as u32);
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.resize(small_offset, 0);
+        buf.extend_from_slice(&small);
+        buf.extend_from_slice(&large);
+
+        let found = find_embedded_jpeg_in_tiff(&buf, 0, FindJpegType::Largest)
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.offset, large_offset);
+        assert_eq!(found.length, large.len());
+    }
+
+    #[test]
+    fn raf_header_jpeg_is_found() {
+        let jpeg = make_test_jpeg(32);
+        let offset = 100usize;
+        let mut buf = Vec::from(&b"FUJIFILMCCD-RAW"[..]);
+        buf.resize(84, 0);
+        buf.extend_from_slice(&(offset as u32).to_be_bytes());
+        buf.extend_from_slice(&(jpeg.len() as u32).to_be_bytes());
+        buf.resize(offset, 0);
+        buf.extend_from_slice(&jpeg);
+
+        let found = find_raf_jpeg(&buf).unwrap();
+        assert_eq!(found.offset, offset);
+        assert_eq!(found.length, jpeg.len());
+        assert!(find_raf_jpeg(b"not raf").is_none());
+
+        let mut bad = buf.clone();
+        bad[84..88].copy_from_slice(&(999_999u32).to_be_bytes());
+        assert!(find_raf_jpeg(&bad).is_none());
     }
 
     #[test]
@@ -182,6 +319,23 @@ mod tests {
         let candidate = make_test_jpeg(64)[1..].to_vec();
         assert!(candidate.starts_with(JPEG_SOI_MISSING_PREFIX));
         candidate
+    }
+
+    fn le_tiff(first_ifd_offset: u32) -> Vec<u8> {
+        le_tiff_with_header(TIFF_HEADER, first_ifd_offset)
+    }
+
+    fn le_tiff_with_header(header: &[u8; 4], first_ifd_offset: u32) -> Vec<u8> {
+        let mut buf = Vec::from(&header[..]);
+        buf.extend_from_slice(&first_ifd_offset.to_le_bytes());
+        buf
+    }
+
+    fn tiff_entry(buf: &mut Vec<u8>, tag: u16, type_id: u16, count: u32, value: u32) {
+        buf.extend_from_slice(&tag.to_le_bytes());
+        buf.extend_from_slice(&type_id.to_le_bytes());
+        buf.extend_from_slice(&count.to_le_bytes());
+        buf.extend_from_slice(&value.to_le_bytes());
     }
 
     /// Straightforward per-SOI forward search; the production scanner must select the same
