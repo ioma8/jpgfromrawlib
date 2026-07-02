@@ -1,6 +1,6 @@
 #[test]
 fn crate_root_exports_cover_the_supported_library_surface() {
-    use jpgfromraw::{FindJpegType, SUPPORTED_EXTENSIONS, process_file, process_file_bytes};
+    use jpgfromraw_lib::{FindJpegType, SUPPORTED_EXTENSIONS, process_file, process_file_bytes};
 
     let _ = FindJpegType::Largest;
     let _ = FindJpegType::Smallest;

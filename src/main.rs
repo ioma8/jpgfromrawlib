@@ -1,8 +1,8 @@
 use anyhow::{Result, bail};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
-use jpgfromraw::SUPPORTED_EXTENSIONS;
-use jpgfromraw::process_file;
+use jpgfromraw_lib::SUPPORTED_EXTENSIONS;
+use jpgfromraw_lib::process_file;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -105,7 +105,7 @@ async fn process_directory(
                             &path,
                             out_dir.as_path(),
                             &relative_path,
-                            jpgfromraw::FindJpegType::Largest,
+                            jpgfromraw_lib::FindJpegType::Largest,
                         )
                         .await?;
                         Ok(())

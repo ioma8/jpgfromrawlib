@@ -1,5 +1,5 @@
 use anyhow::{Result, ensure};
-use jpgfromraw::SUPPORTED_EXTENSIONS;
+use jpgfromraw_lib::SUPPORTED_EXTENSIONS;
 use std::collections::HashSet;
 
 #[test]

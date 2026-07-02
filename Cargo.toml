@@ -1,10 +1,10 @@
 [package]
-name = "jpgfromraw"
+name = "jpgfromraw-lib"
 edition = "2024"
 version = "0.7.0"
 authors = ["Chris Down <chris@chrisdown.name>"]
-description = "A very fast embedded JPEG extractor from RAW files."
-repository = "https://github.com/cdown/jpgfromraw"
+description = "Library fork of jpgfromraw: embedded JPEG extraction from RAW files"
+repository = "https://github.com/ioma8/jpgfromrawlib"
 readme = "README.md"
 keywords = ["raw", "camera", "extract", "jpeg", "jpg"]
 categories = ["command-line-utilities"]

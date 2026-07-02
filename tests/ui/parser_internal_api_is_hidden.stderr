@@ -1,5 +1,5 @@
-error[E0432]: unresolved import `jpgfromraw::parser::is_sof_marker`
+error[E0432]: unresolved import `jpgfromraw_lib::parser::is_sof_marker`
  --> tests/ui/parser_internal_api_is_hidden.rs:1:5
   |
-1 | use jpgfromraw::parser::is_sof_marker;
+1 | use jpgfromraw_lib::parser::is_sof_marker;
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `is_sof_marker` in `parser`

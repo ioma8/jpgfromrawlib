@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, ensure};
-use jpgfromraw::{FindJpegType, process_file_bytes};
+use jpgfromraw_lib::{FindJpegType, process_file_bytes};
 use std::path::{Path, PathBuf};
 
 struct GenericSampleCase {

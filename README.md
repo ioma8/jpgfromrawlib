@@ -56,7 +56,7 @@ from roughly 22k files/sec at `-t 1` to 59k files/sec at `-t 4`.
 The crate also exposes the extraction pipeline as a library:
 
 ```rust
-use jpgfromraw::{process_file_bytes, FindJpegType};
+use jpgfromraw_lib::{process_file_bytes, FindJpegType};
 
 let jpeg: Vec<u8> = process_file_bytes(path, FindJpegType::Largest).await?;
 ```
@@ -76,7 +76,7 @@ For parallel library use, spawn tasks yourself and bound concurrency with a
 ```rust
 use std::sync::Arc;
 
-use jpgfromraw::{process_file_bytes, FindJpegType};
+use jpgfromraw_lib::{process_file_bytes, FindJpegType};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 

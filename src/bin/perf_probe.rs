@@ -1,5 +1,5 @@
 use anyhow::{Result, ensure};
-use jpgfromraw::{FindJpegType, process_file_bytes};
+use jpgfromraw_lib::{FindJpegType, process_file_bytes};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

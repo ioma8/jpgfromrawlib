@@ -9,7 +9,7 @@ mod types;
 pub use extract::{process_file, process_file_bytes};
 pub use types::{FindJpegType, SUPPORTED_EXTENSIONS};
 
-#[deprecated(note = "use crate-root exports instead of jpgfromraw::parser")]
+#[deprecated(note = "use crate-root exports instead of jpgfromraw_lib::parser")]
 pub mod parser {
     pub use crate::{FindJpegType, SUPPORTED_EXTENSIONS, process_file, process_file_bytes};
 }

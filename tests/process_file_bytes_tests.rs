@@ -1,5 +1,5 @@
 use anyhow::Result;
-use jpgfromraw::{FindJpegType, process_file_bytes};
+use jpgfromraw_lib::{FindJpegType, process_file_bytes};
 use std::path::Path;
 use std::time::{Duration, Instant};
 use tokio::fs;
