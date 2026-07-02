@@ -1,7 +1,7 @@
 [package]
 name = "jpgfromraw-lib"
 edition = "2024"
-version = "0.7.1"
+version = "0.7.2"
 authors = ["Chris Down <chris@chrisdown.name>"]
 description = "Library fork of jpgfromraw: embedded JPEG extraction from RAW files"
 repository = "https://github.com/ioma8/jpgfromrawlib"

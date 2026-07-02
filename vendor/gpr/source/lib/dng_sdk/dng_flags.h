@@ -130,6 +130,12 @@
 #elif defined(_M_X64) || defined(__amd64__)
 #define qDNGBigEndian 0
 
+#elif defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+#define qDNGBigEndian 0
+
+#elif defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+#define qDNGBigEndian 1
+
 #elif defined(__LITTLE_ENDIAN__)
 #define qDNGBigEndian 0
 
