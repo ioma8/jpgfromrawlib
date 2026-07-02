@@ -10,6 +10,14 @@ keywords = ["raw", "camera", "extract", "jpeg", "jpg"]
 categories = ["command-line-utilities"]
 license = "MIT"
 rust-version = "1.96"
+exclude = [
+    "bench",
+    "bench_transfers",
+    "docs/",
+    "perf_artifacts/",
+    "test_images/",
+    "wip/",
+]
 
 [lib]
 path = "src/lib.rs"
