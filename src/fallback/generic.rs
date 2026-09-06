@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, ExtendedColorType, ImageFormat};
 use std::borrow::Cow;
-use std::io::Cursor;
 use std::path::Path;
 
 const GENERIC_EXTENSIONS: &[&str] = &[
@@ -38,7 +37,7 @@ pub fn decode_generic_raster_preview<'a>(
 
     let image = image::load_from_memory_with_format(bytes, format)
         .with_context(|| format!("failed to decode generic raster as {format:?}"))?;
-    let jpeg = encode_as_jpeg(&image)?;
+    let jpeg = encode_as_jpeg(image)?;
     Ok(Some(Cow::Owned(jpeg)))
 }
 
@@ -96,11 +95,10 @@ fn has_extension(entry_path: &Path, known_extensions: &[&str]) -> bool {
         })
 }
 
-fn encode_as_jpeg(image: &DynamicImage) -> Result<Vec<u8>> {
-    let rgb = image.to_rgb8();
+fn encode_as_jpeg(image: DynamicImage) -> Result<Vec<u8>> {
+    let rgb = image.into_rgb8();
     let mut output = Vec::with_capacity(super::jpeg_output_capacity(rgb.as_raw().len()));
-    let mut cursor = Cursor::new(&mut output);
-    let mut encoder = JpegEncoder::new_with_quality(&mut cursor, 95);
+    let mut encoder = JpegEncoder::new_with_quality(&mut output, 95);
     encoder.encode(
         rgb.as_raw(),
         rgb.width(),

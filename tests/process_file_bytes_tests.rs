@@ -1,5 +1,5 @@
 use anyhow::Result;
-use jpgfromraw_lib::{FindJpegType, process_file_bytes};
+use jpgfromraw_lib::{FindJpegType, process_file, process_file_bytes};
 use std::path::Path;
 use std::time::{Duration, Instant};
 use tokio::fs;
@@ -79,6 +79,87 @@ async fn test_process_file_bytes_on_directory() -> Result<()> {
 
     assert_eq!(failure_count, 0, "some files failed to process");
     assert!(success_count > 0, "no files processed");
+    Ok(())
+}
+
+#[tokio::test]
+async fn file_output_matches_bytes_output_for_both_selection_modes() -> Result<()> {
+    let input = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_images/sony_a7_iii_01.arw");
+    let output = tempfile::tempdir()?;
+
+    for find_type in [FindJpegType::Largest, FindJpegType::Smallest] {
+        let expected = process_file_bytes(&input, find_type).await?;
+        process_file(&input, output.path(), Path::new("preview.arw"), find_type).await?;
+        let actual = fs::read(output.path().join("preview.jpg")).await?;
+        assert_eq!(actual, expected);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn embedded_jpeg_is_found_with_an_unknown_extension() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let input = temp_dir.path().join("camera.unknown");
+    let source =
+        fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("test_images/sony_a7_iii_01.arw"))
+            .await?;
+    fs::write(&input, source).await?;
+
+    let jpeg = process_file_bytes(&input, FindJpegType::Smallest).await?;
+    assert!(jpeg.starts_with(&[0xff, 0xd8]));
+    assert!(jpeg.ends_with(&[0xff, 0xd9]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn embedded_jpeg_is_found_before_gpr_fallback() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let input = temp_dir.path().join("camera.gpr");
+    let source =
+        fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("test_images/sony_a7_iii_01.arw"))
+            .await?;
+    fs::write(&input, source).await?;
+
+    let jpeg = process_file_bytes(&input, FindJpegType::Smallest).await?;
+    assert!(jpeg.starts_with(&[0xff, 0xd8]));
+    assert!(jpeg.ends_with(&[0xff, 0xd9]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn embedded_jpeg_is_found_before_generic_raster_fallback() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let input = temp_dir.path().join("camera.png");
+    let source =
+        fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("test_images/sony_a7_iii_01.arw"))
+            .await?;
+    fs::write(&input, source).await?;
+
+    let jpeg = process_file_bytes(&input, FindJpegType::Smallest).await?;
+    assert!(jpeg.starts_with(&[0xff, 0xd8]));
+    assert!(jpeg.ends_with(&[0xff, 0xd9]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn output_aliasing_input_does_not_truncate_the_source() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let input = temp_dir.path().join("preview.jpg");
+    let source =
+        fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("test_images/sony_a7_iii_01.arw"))
+            .await?;
+    fs::write(&input, source).await?;
+
+    process_file(
+        &input,
+        temp_dir.path(),
+        Path::new("preview.jpg"),
+        FindJpegType::Smallest,
+    )
+    .await?;
+    let output = fs::read(temp_dir.path().join("preview.jpg")).await?;
+    assert!(output.starts_with(&[0xff, 0xd8]));
+    assert!(output.ends_with(&[0xff, 0xd9]));
     Ok(())
 }
 

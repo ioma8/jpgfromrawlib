@@ -11,14 +11,10 @@ pub fn mmap_raw(file: &File) -> Result<Mmap> {
     // SAFETY: mmap in general is unsafe because the lifecycle of the backing bytes are mutable
     // from outside the program.
     //
-    // This means that, among other things, I/O errors can abort the program (e.g. by SIGBUS). This
-    // is not a big problem, since we are just a command line program and have control over the
-    // entire execution lifecycle.
-    //
-    // Also, any guarantees around validation (like taking a string slice from the &[u8]) are also
-    // only enforced at creation time, so it's possible for the underlying file to cause corruption
-    // (and thus UB). However, in our case, that's not a problem: we don't rely on such
-    // enforcement.
+    // The mapping remains valid while the returned Mmap is alive, but concurrent truncation or
+    // mutation of the backing file is outside this API's safety contract. On Unix, truncation can
+    // cause SIGBUS when a later access faults in an invalidated page; callers must process stable
+    // input files and must not mutate or replace them while extraction is running.
     let raw_buf = unsafe { Mmap::map(file.as_raw_fd())? };
     // We only touch the IFD chain and the embedded JPEG range, so disabling readahead avoids
     // paging in megabytes we never read. Advice is an optimization only; failure is harmless.

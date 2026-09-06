@@ -66,9 +66,11 @@ async fn run() -> Result<()> {
         let permit = semaphore.clone().acquire_owned().await?;
         tasks.spawn(async move {
             let _permit = permit;
-            let jpeg_data = process_file_bytes(&file, FindJpegType::Smallest).await?;
-            let output_path = output_path(&output_dir, &file)?;
-            std::fs::write(output_path, jpeg_data)?;
+            for find_type in [FindJpegType::Smallest, FindJpegType::Largest] {
+                let jpeg_data = process_file_bytes(&file, find_type).await?;
+                let output_path = output_path(&output_dir, &file, find_type)?;
+                std::fs::write(output_path, jpeg_data)?;
+            }
             Ok::<(), anyhow::Error>(())
         });
 
@@ -94,11 +96,15 @@ fn main() -> Result<()> {
         .block_on(run())
 }
 
-fn output_path(output_dir: &Path, input_path: &Path) -> Result<PathBuf> {
+fn output_path(output_dir: &Path, input_path: &Path, find_type: FindJpegType) -> Result<PathBuf> {
     let stem = input_path
         .file_stem()
         .ok_or_else(|| anyhow::anyhow!("missing file stem for {}", input_path.display()))?;
-    let mut output_path = output_dir.join(stem);
+    let name = match find_type {
+        FindJpegType::Smallest => stem.to_string_lossy().into_owned(),
+        FindJpegType::Largest => format!("{}_largest", stem.to_string_lossy()),
+    };
+    let mut output_path = output_dir.join(name);
     output_path.set_extension("jpg");
     Ok(output_path)
 }

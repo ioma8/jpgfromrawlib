@@ -1,14 +1,22 @@
-use anyhow::{Context, Result, ensure};
+#[cfg(feature = "tiff-preview")]
+use anyhow::Context;
+use anyhow::{Result, ensure};
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
+#[cfg(feature = "tiff-preview")]
 use image::ExtendedColorType;
+#[cfg(feature = "tiff-preview")]
 use image::codecs::jpeg::JpegEncoder;
 use memchr::memmem;
 
+#[cfg(feature = "tiff-preview")]
 use crate::fallback;
 
 use super::FindJpegType;
+#[cfg(any(feature = "tiff-preview", test))]
 use super::is_better;
-use super::jpeg::{EmbeddedJpegInfo, get_jpeg_data};
+use super::jpeg::EmbeddedJpegInfo;
+#[cfg(feature = "tiff-preview")]
+use super::jpeg::get_jpeg_data;
 
 pub(crate) const TIFF_HEADER: &[u8; 4] = b"II*\0";
 const TIFF_HEADER_RW2: &[u8; 4] = b"IIU\0";
@@ -22,18 +30,26 @@ const MAX_IFD_CHAIN_LEN: usize = 64;
 const JPEG_TAG: u16 = 0x201;
 const JPEG_LENGTH_TAG: u16 = 0x202;
 const TAG_JPG_FROM_RAW: u16 = 0x2E;
+#[cfg(any(feature = "tiff-preview", test))]
 const TAG_IMAGE_WIDTH: u16 = 0x100;
+#[cfg(any(feature = "tiff-preview", test))]
 const TAG_IMAGE_LENGTH: u16 = 0x101;
+#[cfg(any(feature = "tiff-preview", test))]
 const TAG_BITS_PER_SAMPLE: u16 = 0x102;
+#[cfg(any(feature = "tiff-preview", test))]
 const TAG_COMPRESSION: u16 = 0x103;
+#[cfg(any(feature = "tiff-preview", test))]
 const TAG_PHOTOMETRIC_INTERPRETATION: u16 = 0x106;
 const TAG_STRIP_OFFSETS: u16 = 0x111;
 const TAG_ORIENTATION: u16 = 0x112;
+#[cfg(any(feature = "tiff-preview", test))]
 const TAG_SAMPLES_PER_PIXEL: u16 = 0x115;
+#[cfg(any(feature = "tiff-preview", test))]
 const TAG_ROWS_PER_STRIP: u16 = 0x116;
 const TAG_STRIP_BYTE_COUNTS: u16 = 0x117;
 const TAG_SUB_IFDS: u16 = 0x14A;
 
+#[cfg(any(feature = "tiff-preview", test))]
 #[derive(Debug, Default)]
 pub(crate) struct TiffPreviewInfo {
     strip_offsets: Vec<usize>,
@@ -49,6 +65,7 @@ pub(crate) struct TiffPreviewInfo {
     rows_per_strip: Option<u32>,
 }
 
+#[cfg(any(feature = "tiff-preview", test))]
 impl TiffPreviewInfo {
     fn encoded_len(&self) -> usize {
         self.encoded_len
@@ -100,6 +117,7 @@ impl<'a> TiffReader<'a> {
         Ok(&self.buf[offset..end])
     }
 
+    #[cfg(any(feature = "tiff-preview", test))]
     fn read_u16_values(&self, type_id: u16, count: u32, value_field: &'a [u8]) -> Result<Vec<u16>> {
         ensure!(type_id == 3, "Unsupported TIFF u16 field type: {type_id}");
         let bytes = self.field_bytes(type_id, count, value_field)?;
@@ -199,15 +217,28 @@ pub(crate) fn find_tiff_header_offset(raw_buf: &[u8]) -> Result<usize> {
 ///
 /// - kamadak-exif: Reads into a big `Vec<u8>`, which is huge for our big RAW.
 /// - quickexif: Cannot iterate over IFDs.
+#[cfg(test)]
 pub(crate) fn find_embedded_jpeg_in_tiff(
     raw_buf: &[u8],
     tiff_offset: usize,
     find_type: FindJpegType,
 ) -> Result<Option<EmbeddedJpegInfo>> {
+    let mut candidates = find_embedded_jpegs_in_tiff(raw_buf, tiff_offset)?;
+    candidates.sort_unstable_by(|left, right| match find_type {
+        FindJpegType::Largest => right.length.cmp(&left.length),
+        FindJpegType::Smallest => left.length.cmp(&right.length),
+    });
+    Ok(candidates.into_iter().next())
+}
+
+pub(crate) fn find_embedded_jpegs_in_tiff(
+    raw_buf: &[u8],
+    tiff_offset: usize,
+) -> Result<Vec<EmbeddedJpegInfo>> {
     let raw_buf = &raw_buf[tiff_offset..];
     let reader = tiff_reader(raw_buf)?;
     let mut pending = vec![usize::try_from(reader.read_u32(&raw_buf[4..8]))?];
-    let mut best: Option<EmbeddedJpegInfo> = None;
+    let mut candidates = Vec::new();
     let mut chain_guard = IfdChainGuard::new();
 
     while let Some(ifd_offset) = pending.pop() {
@@ -231,6 +262,8 @@ pub(crate) fn find_embedded_jpeg_in_tiff(
         let mut cur_orientation = None;
         let mut cur_offset_is_strip = false;
         let mut cur_length_is_strip = false;
+        let mut cur_offset_is_embedded = false;
+        let mut cur_length_is_embedded = false;
 
         for entry in entries_cursor
             .chunks_exact(IFD_ENTRY_SIZE)
@@ -244,20 +277,32 @@ pub(crate) fn find_embedded_jpeg_in_tiff(
                 JPEG_TAG => {
                     cur_offset = Some(reader.read_u32(&entry[8..12]).try_into()?);
                     cur_offset_is_strip = false;
+                    cur_offset_is_embedded = true;
+                    if !cur_length_is_embedded {
+                        cur_length = None;
+                        cur_length_is_strip = false;
+                    }
                 }
                 TAG_JPG_FROM_RAW => {
                     let offset = usize::try_from(reader.read_u32(&entry[8..12]))?;
                     let length = usize::try_from(count)?;
-                    if raw_buf.get(offset..offset + 3) == Some(b"\xFF\xD8\xFF") {
+                    if raw_buf.get(offset..offset.saturating_add(3)) == Some(b"\xFF\xD8\xFF") {
                         cur_offset = Some(offset);
                         cur_length = Some(length);
                         cur_offset_is_strip = false;
                         cur_length_is_strip = false;
+                        cur_offset_is_embedded = true;
+                        cur_length_is_embedded = true;
                     }
                 }
                 JPEG_LENGTH_TAG => {
                     cur_length = Some(reader.read_u32(&entry[8..12]).try_into()?);
                     cur_length_is_strip = false;
+                    cur_length_is_embedded = true;
+                    if !cur_offset_is_embedded {
+                        cur_offset = None;
+                        cur_offset_is_strip = false;
+                    }
                 }
                 TAG_SUB_IFDS => {
                     if let Ok(values) = reader.read_u32_values(type_id, count, &entry[8..12]) {
@@ -269,29 +314,31 @@ pub(crate) fn find_embedded_jpeg_in_tiff(
                     }
                 }
                 TAG_STRIP_OFFSETS if count == 1 => {
-                    cur_offset = Some(reader.read_u32(&entry[8..12]).try_into()?);
-                    cur_offset_is_strip = true;
+                    if !cur_offset_is_embedded {
+                        cur_offset = Some(reader.read_u32(&entry[8..12]).try_into()?);
+                        cur_offset_is_strip = true;
+                    }
                 }
                 TAG_STRIP_BYTE_COUNTS if count == 1 => {
-                    cur_length = Some(reader.read_u32(&entry[8..12]).try_into()?);
-                    cur_length_is_strip = true;
+                    if !cur_length_is_embedded {
+                        cur_length = Some(reader.read_u32(&entry[8..12]).try_into()?);
+                        cur_length_is_strip = true;
+                    }
                 }
                 TAG_ORIENTATION => cur_orientation = Some(reader.read_u16(&entry[8..10])),
                 _ => {}
             }
+        }
 
-            if let (Some(offset), Some(length)) = (cur_offset, cur_length) {
-                let is_jpeg_candidate = if cur_offset_is_strip || cur_length_is_strip {
-                    offset + 3 <= raw_buf.len() && raw_buf[offset..].starts_with(b"\xFF\xD8\xFF")
-                } else {
-                    true
-                };
-                if !is_jpeg_candidate {
-                    continue;
-                }
-                if is_better(length, best.map_or(0, |jpeg| jpeg.length), find_type) {
-                    best = Some(EmbeddedJpegInfo::new(offset, length, cur_orientation));
-                }
+        if let (Some(offset), Some(length)) = (cur_offset, cur_length) {
+            let Some(end) = offset.checked_add(length) else {
+                continue;
+            };
+            if end <= raw_buf.len()
+                && (!cur_offset_is_strip && !cur_length_is_strip
+                    || raw_buf[offset..].starts_with(b"\xFF\xD8\xFF"))
+            {
+                candidates.push(EmbeddedJpegInfo::new(offset, length, cur_orientation));
             }
         }
 
@@ -307,21 +354,19 @@ pub(crate) fn find_embedded_jpeg_in_tiff(
         );
     }
 
-    if let Some(best) = best {
-        ensure!(
-            best.offset + best.length <= raw_buf.len(),
-            "JPEG data exceeds file size"
-        );
-        return Ok(Some(EmbeddedJpegInfo::new(
-            best.offset + tiff_offset,
-            best.length,
-            best.orientation,
-        )));
-    }
-
-    Ok(None)
+    Ok(candidates
+        .into_iter()
+        .map(|candidate| {
+            EmbeddedJpegInfo::new(
+                candidate.offset + tiff_offset,
+                candidate.length,
+                candidate.orientation,
+            )
+        })
+        .collect())
 }
 
+#[cfg(any(feature = "tiff-preview", test))]
 pub(crate) fn find_tiff_preview(
     raw_buf: &[u8],
     tiff_offset: usize,
@@ -451,6 +496,7 @@ pub(crate) fn find_tiff_preview(
     Ok(best)
 }
 
+#[cfg(any(feature = "tiff-preview", test))]
 fn is_supported_tiff_preview(preview: &TiffPreviewInfo) -> bool {
     preview.width > 0
         && preview.height > 0
@@ -464,6 +510,7 @@ fn is_supported_tiff_preview(preview: &TiffPreviewInfo) -> bool {
         && preview.encoded_len() == preview.width as usize * preview.height as usize * 3
 }
 
+#[cfg(feature = "tiff-preview")]
 fn encode_tiff_preview_as_jpeg(raw_buf: &[u8], preview: &TiffPreviewInfo) -> Result<Vec<u8>> {
     let mut rgb = Vec::with_capacity(preview.encoded_len());
     for (offset, len) in preview
@@ -492,17 +539,25 @@ pub(crate) fn try_tiff_preview(
     tiff_offset: Option<usize>,
     find_type: FindJpegType,
 ) -> Result<Option<Vec<u8>>> {
-    let Some(tiff_offset) = tiff_offset else {
-        return Ok(None);
-    };
-    let Ok(preview) = find_tiff_preview(raw_buf, tiff_offset, find_type) else {
-        return Ok(None);
-    };
-    let jpeg_buf = encode_tiff_preview_as_jpeg(&raw_buf[tiff_offset..], &preview)?;
-    Ok(Some(get_jpeg_data(
-        &jpeg_buf,
-        &EmbeddedJpegInfo::new(0, jpeg_buf.len(), preview.orientation),
-    )))
+    #[cfg(not(feature = "tiff-preview"))]
+    {
+        let _ = (raw_buf, tiff_offset, find_type);
+        Ok(None)
+    }
+    #[cfg(feature = "tiff-preview")]
+    {
+        let Some(tiff_offset) = tiff_offset else {
+            return Ok(None);
+        };
+        let Ok(preview) = find_tiff_preview(raw_buf, tiff_offset, find_type) else {
+            return Ok(None);
+        };
+        let jpeg_buf = encode_tiff_preview_as_jpeg(&raw_buf[tiff_offset..], &preview)?;
+        Ok(Some(get_jpeg_data(
+            &jpeg_buf,
+            &EmbeddedJpegInfo::new(0, jpeg_buf.len(), preview.orientation),
+        )))
+    }
 }
 
 fn tiff_reader(raw_buf: &[u8]) -> Result<TiffReader<'_>> {
@@ -518,6 +573,7 @@ fn tiff_reader(raw_buf: &[u8]) -> Result<TiffReader<'_>> {
     })
 }
 
+#[cfg(any(feature = "tiff-preview", test))]
 fn first_u32(
     reader: &TiffReader<'_>,
     type_id: u16,

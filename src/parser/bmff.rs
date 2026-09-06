@@ -71,14 +71,13 @@ pub(crate) fn find_cr3_preview(
                     let size_offset = if kind == b"THMB" { 8 } else { 12 };
                     if let Some(candidate) =
                         preview_candidate(raw_buf, payload, box_end, size_offset)
-                    {
-                        if is_better(
+                        && is_better(
                             candidate.length,
                             best.map_or(0, |jpeg| jpeg.length),
                             find_type,
-                        ) {
-                            best = Some(candidate);
-                        }
+                        )
+                    {
+                        best = Some(candidate);
                     }
                 }
                 _ => {}

@@ -4,10 +4,10 @@ use image::{ExtendedColorType, ImageFormat};
 use std::path::Path;
 use std::process::Command;
 
-use super::temp_dir::TempDirGuard;
+use tempfile::Builder;
 
 pub fn decode_raw_preview(entry_path: &Path) -> Result<Vec<u8>> {
-    let temp_dir = TempDirGuard::new("jpgfromraw-dcraw")?;
+    let temp_dir = Builder::new().prefix("jpgfromraw-dcraw").tempdir()?;
     let temp_input = temp_dir.path().join(raw_name(entry_path)?);
     stage_input_file(entry_path, &temp_input)?;
 
@@ -24,7 +24,7 @@ pub fn decode_raw_preview(entry_path: &Path) -> Result<Vec<u8>> {
 }
 
 fn try_dcraw_thumbnail(temp_input: &Path) -> Result<Option<Vec<u8>>> {
-    let status = Command::new(env!("DCRAW_BIN"))
+    let status = Command::new(tool_path("JPGFROMRAW_DCRAW", "jpgfromraw-dcraw"))
         .arg("-e")
         .arg(temp_input)
         .status();
@@ -51,7 +51,7 @@ fn is_complete_jpeg(bytes: &[u8]) -> bool {
 }
 
 fn run_dcraw(input_path: &Path) -> Result<()> {
-    let status = Command::new(env!("DCRAW_BIN"))
+    let status = Command::new(tool_path("JPGFROMRAW_DCRAW", "jpgfromraw-dcraw"))
         .arg("-h")
         .arg("-W")
         .arg("-o")
@@ -61,6 +61,18 @@ fn run_dcraw(input_path: &Path) -> Result<()> {
         .context("Failed to launch dcraw fallback")?;
     ensure!(status.success(), "dcraw failed with status {status}");
     Ok(())
+}
+
+fn tool_path(variable: &str, executable: &str) -> std::path::PathBuf {
+    if let Some(path) = std::env::var_os(variable) {
+        return path.into();
+    }
+    if let Some(path) = option_env!("DCRAW_BIN")
+        && std::path::Path::new(path).exists()
+    {
+        return path.into();
+    }
+    executable.into()
 }
 
 fn ppm_to_jpeg(ppm: &[u8]) -> Result<Vec<u8>> {

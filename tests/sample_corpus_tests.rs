@@ -586,55 +586,8 @@ fn sample_path(case: &SampleCase) -> PathBuf {
 }
 
 fn decode_jpeg(bytes: &[u8]) -> Result<()> {
-    ensure!(bytes.starts_with(&[0xFF, 0xD8]), "missing JPEG SOI marker");
-    ensure!(bytes.ends_with(&[0xFF, 0xD9]), "missing JPEG EOI marker");
-    let mut cursor = 2;
-    let mut found_sof = false;
-
-    while cursor + 3 < bytes.len() {
-        ensure!(bytes[cursor] == 0xFF, "expected JPEG marker prefix");
-        while cursor < bytes.len() && bytes[cursor] == 0xFF {
-            cursor += 1;
-        }
-        ensure!(cursor < bytes.len(), "truncated JPEG marker");
-
-        let marker = bytes[cursor];
-        cursor += 1;
-
-        if marker == 0xD9 {
-            break;
-        }
-        if marker == 0xDA {
-            ensure!(found_sof, "JPEG scan started before SOF");
-            break;
-        }
-        if (0xD0..=0xD7).contains(&marker) || marker == 0x01 {
-            continue;
-        }
-
-        ensure!(cursor + 1 < bytes.len(), "truncated JPEG segment length");
-        let segment_len = u16::from_be_bytes([bytes[cursor], bytes[cursor + 1]]) as usize;
-        ensure!(segment_len >= 2, "invalid JPEG segment length");
-        let segment_start = cursor + 2;
-        let segment_end = cursor + segment_len;
-        ensure!(segment_end <= bytes.len(), "JPEG segment exceeds buffer");
-
-        let is_sof = is_sof_marker(marker);
-        if is_sof {
-            ensure!(segment_end - segment_start >= 6, "truncated SOF segment");
-            let precision = bytes[segment_start];
-            let height = u16::from_be_bytes([bytes[segment_start + 1], bytes[segment_start + 2]]);
-            let width = u16::from_be_bytes([bytes[segment_start + 3], bytes[segment_start + 4]]);
-            ensure!(precision > 0, "JPEG precision must be positive");
-            ensure!(width > 0, "JPEG width must be positive");
-            ensure!(height > 0, "JPEG height must be positive");
-            found_sof = true;
-        }
-
-        cursor = segment_end;
-    }
-
-    ensure!(found_sof, "missing JPEG SOF segment");
+    let mut decoder = jpeg_decoder::Decoder::new(bytes);
+    decoder.decode().map(|_| ())?;
     Ok(())
 }
 
@@ -746,8 +699,4 @@ async fn sample_corpus_performance_audit() -> Result<()> {
     }
 
     Ok(())
-}
-
-const fn is_sof_marker(marker: u8) -> bool {
-    marker >= 0xC0 && marker <= 0xCF && !matches!(marker, 0xC4 | 0xC8 | 0xCC)
 }

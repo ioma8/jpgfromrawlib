@@ -1,3 +1,5 @@
+#![cfg(feature = "generic-raster")]
+
 use anyhow::{Context, Result, ensure};
 use jpgfromraw_lib::{FindJpegType, process_file_bytes};
 use std::path::{Path, PathBuf};

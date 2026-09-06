@@ -12,10 +12,13 @@ Run from the repo root:
 
 This will:
 
-- build `target/release/perf_probe`
+- build `target/release/perf_probe` with the `cli` feature
 - run `hyperfine` against the probe binary
 - write fresh outputs to `perf_artifacts/latest/outputs`
 - compare their SHA-256 manifest with `perf_artifacts/baseline/sha256.txt`
+
+The probe writes the historical Smallest output names and adds a `_largest.jpg`
+file for each input, so one run covers both selection modes.
 
 ## Baseline
 

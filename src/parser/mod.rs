@@ -1,4 +1,5 @@
 use anyhow::Result;
+use memmap2::Mmap;
 use std::path::Path;
 
 pub(crate) use crate::types::FindJpegType;
@@ -19,26 +20,21 @@ pub(crate) async fn process_file_bytes(
     entry_path: &Path,
     find_type: FindJpegType,
 ) -> Result<Vec<u8>> {
-    let in_file = platform::open_raw(entry_path)?;
-    let raw_buf = platform::mmap_raw(&in_file)?;
-    let tiff_offset = tiff::find_tiff_header_offset(&raw_buf).ok();
-    let jpeg_info = bmff::find_cr3_preview(&raw_buf, find_type)
-        .or_else(|| jpeg::find_raf_jpeg(&raw_buf))
-        .or_else(|| match tiff_offset {
-            Some(tiff_offset) => tiff::find_embedded_jpeg_in_tiff(&raw_buf, tiff_offset, find_type)
-                .ok()
-                .flatten()
-                .or_else(|| jpeg::find_embedded_jpeg_by_markers(&raw_buf, find_type).ok()),
-            None => jpeg::find_embedded_jpeg_by_markers(&raw_buf, find_type).ok(),
-        });
-
+    let (raw_buf, jpeg_info) = map_embedded_jpeg(entry_path, find_type)?;
     if let Some(jpeg_info) = jpeg_info {
         let jpeg_buf = jpeg::extract_jpeg(&raw_buf, &jpeg_info);
-        if jpeg::is_valid_jpeg(jpeg_buf) {
-            return Ok(jpeg::get_jpeg_data(jpeg_buf, &jpeg_info));
-        }
+        return Ok(jpeg::get_jpeg_data(jpeg_buf, &jpeg_info));
     }
 
+    process_mapped_fallback(entry_path, find_type, raw_buf).await
+}
+
+pub(crate) async fn process_mapped_fallback(
+    entry_path: &Path,
+    find_type: FindJpegType,
+    raw_buf: Mmap,
+) -> Result<Vec<u8>> {
+    let tiff_offset = tiff::find_tiff_header_offset(&raw_buf).ok();
     if let Some(jpeg_data) = jpeg::try_missing_ff(&raw_buf, find_type) {
         return Ok(jpeg_data);
     }
@@ -46,7 +42,55 @@ pub(crate) async fn process_file_bytes(
         return Ok(jpeg_data);
     }
 
-    fallback::decode_raw_preview_fallback(entry_path).await
+    fallback::decode_raw_preview_fallback(entry_path, Some(raw_buf)).await
+}
+
+pub(crate) fn map_embedded_jpeg(
+    entry_path: &Path,
+    find_type: FindJpegType,
+) -> Result<(Mmap, Option<jpeg::EmbeddedJpegInfo>)> {
+    let in_file = platform::open_raw(entry_path)?;
+    let raw_buf = platform::mmap_raw(&in_file)?;
+    let tiff_offset = tiff::find_tiff_header_offset(&raw_buf).ok();
+    let mut structured = Vec::new();
+    structured.extend(bmff::find_cr3_preview(&raw_buf, find_type));
+    structured.extend(jpeg::find_raf_jpeg(&raw_buf));
+    if let Some(offset) = tiff_offset
+        && let Ok(mut candidates) = tiff::find_embedded_jpegs_in_tiff(&raw_buf, offset)
+    {
+        candidates.sort_unstable_by(|left, right| match find_type {
+            FindJpegType::Largest => right.length.cmp(&left.length),
+            FindJpegType::Smallest => left.length.cmp(&right.length),
+        });
+        structured.extend(candidates);
+    }
+
+    for jpeg_info in structured {
+        if jpeg_info
+            .offset
+            .checked_add(jpeg_info.length)
+            .is_none_or(|end| end > raw_buf.len())
+        {
+            continue;
+        }
+        let jpeg_buf = jpeg::extract_jpeg(&raw_buf, &jpeg_info);
+        if jpeg::is_valid_jpeg(jpeg_buf) {
+            return Ok((raw_buf, Some(jpeg_info)));
+        }
+    }
+
+    if let Some(jpeg_info) = jpeg::find_embedded_jpeg_by_markers(&raw_buf, find_type).ok()
+        && jpeg_info
+            .offset
+            .checked_add(jpeg_info.length)
+            .is_some_and(|end| end <= raw_buf.len())
+    {
+        let jpeg_buf = jpeg::extract_jpeg(&raw_buf, &jpeg_info);
+        if jpeg::is_valid_jpeg(jpeg_buf) {
+            return Ok((raw_buf, Some(jpeg_info)));
+        }
+    }
+    Ok((raw_buf, None))
 }
 
 #[cfg(test)]
@@ -58,7 +102,7 @@ mod tests {
     };
     use super::tiff::{
         EXIF_HEADER, EXIF_HEADER_SIZE, TIFF_HEADER, find_embedded_jpeg_in_tiff,
-        find_tiff_header_offset, find_tiff_preview,
+        find_embedded_jpegs_in_tiff, find_tiff_header_offset, find_tiff_preview,
     };
     use super::*;
     use memchr::memmem;
@@ -91,16 +135,17 @@ mod tests {
     #[test]
     fn tiff_sub_ifd_jpeg_is_found() {
         let jpeg = make_test_jpeg(32);
-        let jpeg_offset = 80usize;
+        let jpeg_offset = 96usize;
         let sub_ifd_offset = 40usize;
         let mut buf = le_tiff(8);
         buf.extend_from_slice(&1u16.to_le_bytes());
         tiff_entry(&mut buf, 0x14A, 4, 1, sub_ifd_offset as u32);
         buf.extend_from_slice(&0u32.to_le_bytes());
         buf.resize(sub_ifd_offset, 0);
-        buf.extend_from_slice(&2u16.to_le_bytes());
+        buf.extend_from_slice(&3u16.to_le_bytes());
         tiff_entry(&mut buf, 0x201, 4, 1, jpeg_offset as u32);
         tiff_entry(&mut buf, 0x202, 4, 1, jpeg.len() as u32);
+        tiff_entry(&mut buf, 0x112, 3, 1, 6);
         buf.extend_from_slice(&0u32.to_le_bytes());
         buf.resize(jpeg_offset, 0);
         buf.extend_from_slice(&jpeg);
@@ -110,6 +155,7 @@ mod tests {
             .unwrap();
         assert_eq!(found.offset, jpeg_offset);
         assert_eq!(found.length, jpeg.len());
+        assert_eq!(found.orientation, Some(6));
     }
 
     #[test]
@@ -206,6 +252,88 @@ mod tests {
     }
 
     #[test]
+    fn invalid_raf_candidate_falls_through_to_marker_recovery() {
+        let invalid = [0xff, 0xd8, 0xff, 0xdb, 0, 4, 0, 0, 0xff, 0xd9];
+        let valid = make_test_jpeg(32);
+        let offset = 100usize;
+        let mut buf = Vec::from(&b"FUJIFILMCCD-RAW"[..]);
+        buf.resize(84, 0);
+        buf.extend_from_slice(&(offset as u32).to_be_bytes());
+        buf.extend_from_slice(&(invalid.len() as u32).to_be_bytes());
+        buf.resize(offset, 0);
+        buf.extend_from_slice(&invalid);
+        buf.extend_from_slice(&valid);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("invalid.raf");
+        std::fs::write(&path, buf).unwrap();
+        let (mapped, found) = map_embedded_jpeg(&path, FindJpegType::Largest).unwrap();
+        let found = found.unwrap();
+        assert_eq!(&mapped[found.offset..found.offset + found.length], valid);
+    }
+
+    #[test]
+    fn invalid_cr3_candidate_falls_through_to_marker_recovery() {
+        let invalid = [0xff, 0xd8, 0xff, 0xdb, 0, 4, 0, 0, 0xff, 0xd9];
+        let valid = make_test_jpeg(32);
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&12u32.to_be_bytes());
+        buf.extend_from_slice(b"ftypcrx ");
+        let mut payload = vec![0u8; 12];
+        payload.extend_from_slice(&(invalid.len() as u32).to_be_bytes());
+        payload.extend_from_slice(&invalid);
+        buf.extend_from_slice(&(8u32 + payload.len() as u32).to_be_bytes());
+        buf.extend_from_slice(b"PRVW");
+        buf.extend_from_slice(&payload);
+        buf.extend_from_slice(&valid);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("invalid.cr3");
+        std::fs::write(&path, buf).unwrap();
+        let (mapped, found) = map_embedded_jpeg(&path, FindJpegType::Largest).unwrap();
+        let found = found.unwrap();
+        assert_eq!(&mapped[found.offset..found.offset + found.length], valid);
+    }
+
+    #[test]
+    fn invalid_larger_tiff_candidate_does_not_hide_valid_smaller_candidate() {
+        let invalid = vec![0xff, 0xd8, 0xff, 0xdb, 0, 4, 0, 0, 0xff, 0xd9];
+        let valid = make_test_jpeg(32);
+        let bad_offset = 80usize;
+        let valid_offset = bad_offset + invalid.len() + 8;
+        let first_ifd_offset = 8usize;
+        let second_ifd_offset = 40usize;
+        let mut buf = le_tiff(first_ifd_offset as u32);
+
+        buf.extend_from_slice(&2u16.to_le_bytes());
+        tiff_entry(&mut buf, 0x111, 4, 1, bad_offset as u32);
+        tiff_entry(&mut buf, 0x117, 4, 1, (invalid.len() + valid.len()) as u32);
+        buf.extend_from_slice(&(second_ifd_offset as u32).to_le_bytes());
+
+        buf.resize(second_ifd_offset, 0);
+        buf.extend_from_slice(&2u16.to_le_bytes());
+        tiff_entry(&mut buf, 0x201, 4, 1, valid_offset as u32);
+        tiff_entry(&mut buf, 0x202, 4, 1, valid.len() as u32);
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.resize(bad_offset, 0);
+        buf.extend_from_slice(&invalid);
+        buf.resize(valid_offset, 0);
+        buf.extend_from_slice(&valid);
+
+        let candidates = find_embedded_jpegs_in_tiff(&buf, 0).unwrap();
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates[0].length > candidates[1].length);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("invalid.tif");
+        std::fs::write(&path, buf).unwrap();
+        let (mapped, found) = map_embedded_jpeg(&path, FindJpegType::Largest).unwrap();
+        let found = found.unwrap();
+        assert_eq!(found.offset, valid_offset);
+        assert_eq!(&mapped[found.offset..found.offset + found.length], valid);
+    }
+
+    #[test]
     fn zero_count_tiff_fields_error_instead_of_panicking() {
         let buf = [
             b'I', b'I', b'*', 0, 8, 0, 0, 0, 1, 0, 0x00, 0x01, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -246,6 +374,30 @@ mod tests {
         let found = find_embedded_jpeg_by_markers(&buf, FindJpegType::Largest).unwrap();
         assert_eq!(found.offset, small.len());
         assert_eq!(found.length, large.len());
+    }
+
+    #[test]
+    fn marker_scans_stop_after_an_eoi_free_tail() {
+        let mut buf = make_test_jpeg(16);
+        buf.extend(std::iter::repeat_n(JPEG_SOI_PREFIX.iter().copied(), 128).flatten());
+
+        for find_type in [FindJpegType::Largest, FindJpegType::Smallest] {
+            let found = find_embedded_jpeg_by_markers(&buf, find_type).unwrap();
+            assert_eq!(found.offset, 0);
+        }
+    }
+
+    #[test]
+    fn valid_marker_jpeg_survives_unterminated_later_candidates() {
+        let valid = make_test_jpeg(64);
+        let mut buf = valid.clone();
+        buf.extend(std::iter::repeat_n(JPEG_SOI_PREFIX.iter().copied(), 128).flatten());
+
+        for find_type in [FindJpegType::Largest, FindJpegType::Smallest] {
+            let found = find_embedded_jpeg_by_markers(&buf, find_type).unwrap();
+            assert_eq!(found.offset, 0);
+            assert_eq!(found.length, valid.len());
+        }
     }
 
     #[test]

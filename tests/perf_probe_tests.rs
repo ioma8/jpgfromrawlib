@@ -1,3 +1,5 @@
+#![cfg(feature = "cli")]
+
 use anyhow::{Result, ensure};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,6 +30,7 @@ fn perf_probe_binary() -> PathBuf {
     manifest_dir.join("target/debug/perf_probe")
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn perf_probe_writes_jpegs_for_test_images() -> Result<()> {
     let input_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_images");
@@ -46,8 +49,9 @@ fn perf_probe_writes_jpegs_for_test_images() -> Result<()> {
 
     ensure!(raw_count > 0, "expected test_images to contain raw files");
     ensure!(
-        jpg_count == raw_count,
-        "expected {raw_count} jpgs, got {jpg_count}"
+        jpg_count == raw_count * 2,
+        "expected {} jpgs, got {jpg_count}",
+        raw_count * 2
     );
 
     Ok(())

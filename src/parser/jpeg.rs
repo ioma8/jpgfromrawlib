@@ -81,7 +81,7 @@ pub(crate) fn find_embedded_jpeg_by_markers(
         search_start = jpeg_start + JPEG_SOI_PREFIX.len();
 
         let Some(jpeg_end) = eoi_scanner.end_at_or_after(raw_buf, search_start) else {
-            continue;
+            break;
         };
         let candidate_len = jpeg_end - jpeg_start;
         if !is_better(candidate_len, best.map_or(0, |jpeg| jpeg.length), find_type) {
@@ -114,7 +114,7 @@ pub(crate) fn find_embedded_jpeg_missing_ff_prefix(
         let Some(jpeg_end) =
             eoi_scanner.end_at_or_after(raw_buf, jpeg_start + JPEG_SOI_MISSING_PREFIX.len())
         else {
-            continue;
+            break;
         };
         let candidate_len = jpeg_end + 1 - jpeg_start;
         if !is_better(candidate_len, best.as_ref().map_or(0, Vec::len), find_type) {
@@ -201,7 +201,7 @@ pub const fn is_sof_marker(marker: u8) -> bool {
 /// The embedded JPEG comes with no EXIF data. While most of it is outside of the scope of this
 /// application, it's pretty vexing to have the wrong orientation, so copy that over.
 #[rustfmt::skip]
-const fn get_header_bytes(orientation: u16) -> [u8; 34] {
+pub(crate) const fn get_header_bytes(orientation: u16) -> [u8; 34] {
     let orientation_bytes = orientation.to_le_bytes();
     [
         0xff, 0xd8, // SOI

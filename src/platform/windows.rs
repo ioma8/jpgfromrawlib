@@ -10,7 +10,8 @@ use windows::Win32::Storage::FileSystem::FILE_FLAG_RANDOM_ACCESS;
 use crate::parser_impl::jpeg::EmbeddedJpegInfo;
 
 pub fn mmap_raw(file: &File) -> Result<Mmap> {
-    // SAFETY: see comment in unix.rs
+    // SAFETY: the mapping requires a stable backing file for its lifetime; callers must not
+    // concurrently mutate, truncate, or replace the input while extraction is running.
     let raw_buf = unsafe { Mmap::map(file.as_raw_handle())? };
     Ok(raw_buf)
 }

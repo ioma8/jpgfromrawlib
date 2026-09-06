@@ -1,9 +1,8 @@
 use anyhow::{Result, bail};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
-use jpgfromraw_lib::SUPPORTED_EXTENSIONS;
 use jpgfromraw_lib::process_file;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
@@ -61,15 +60,6 @@ async fn process_directory(
     ext: Option<OsString>,
     transfers: usize,
 ) -> Result<()> {
-    let is_valid_extension = |candidate: &OsStr| {
-        SUPPORTED_EXTENSIONS
-            .iter()
-            .any(|supported| candidate.eq_ignore_ascii_case(supported))
-            || ext
-                .as_deref()
-                .is_some_and(|extra| candidate.eq_ignore_ascii_case(extra))
-    };
-
     let mut dir_queue = vec![in_dir.to_path_buf()];
     let progress_bar = ProgressBar::new_spinner();
     progress_bar.set_style(
@@ -88,7 +78,10 @@ async fn process_directory(
             let path = entry.path();
             if entry.file_type().await?.is_dir() {
                 dir_queue.push(path);
-            } else if path.extension().is_some_and(is_valid_extension) {
+            } else if ext.as_deref().is_none_or(|extra| {
+                path.extension()
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(extra))
+            }) {
                 if tasks.len() >= transfers {
                     collect_processing_result(
                         tasks.join_next().await,
@@ -100,19 +93,15 @@ async fn process_directory(
                 let task_progress_bar = progress_bar.clone();
                 let out_dir = Arc::clone(&out_dir);
                 tasks.spawn(async move {
-                    let result = async {
-                        process_file(
-                            &path,
-                            out_dir.as_path(),
-                            &relative_path,
-                            jpgfromraw_lib::FindJpegType::Largest,
-                        )
-                        .await?;
-                        Ok(())
-                    }
+                    let result = process_file(
+                        &path,
+                        out_dir.as_path(),
+                        &relative_path,
+                        jpgfromraw_lib::FindJpegType::Largest,
+                    )
                     .await;
                     task_progress_bar.inc(1);
-                    Ok(ProcessingResult { result, path })
+                    ProcessingResult { result, path }
                 });
             }
         }
@@ -132,14 +121,14 @@ async fn process_directory(
 }
 
 fn collect_processing_result(
-    task_result: Option<std::result::Result<Result<ProcessingResult>, tokio::task::JoinError>>,
+    task_result: Option<std::result::Result<ProcessingResult, tokio::task::JoinError>>,
     progress_bar: &ProgressBar,
     nr_failed: &mut usize,
 ) -> Result<()> {
     let Some(task_result) = task_result else {
         return Ok(());
     };
-    let pr_res = task_result??;
+    let pr_res = task_result?;
     if let Err(e) = pr_res.result {
         *nr_failed += 1;
         let msg = format!("Error processing file {}: {:?}", pr_res.path.display(), e);
