@@ -122,7 +122,9 @@ impl<'a> TiffReader<'a> {
         ensure!(type_id == 3, "Unsupported TIFF u16 field type: {type_id}");
         let bytes = self.field_bytes(type_id, count, value_field)?;
         Ok(bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|chunk| self.read_u16(chunk))
             .collect())
     }
@@ -131,11 +133,15 @@ impl<'a> TiffReader<'a> {
         let bytes = self.field_bytes(type_id, count, value_field)?;
         match type_id {
             3 => Ok(bytes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|chunk| u32::from(self.read_u16(chunk)))
                 .collect()),
             4 => Ok(bytes
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|chunk| self.read_u32(chunk))
                 .collect()),
             _ => Err(anyhow::anyhow!(
@@ -266,7 +272,9 @@ pub(crate) fn find_embedded_jpegs_in_tiff(
         let mut cur_length_is_embedded = false;
 
         for entry in entries_cursor
-            .chunks_exact(IFD_ENTRY_SIZE)
+            .as_chunks::<IFD_ENTRY_SIZE>()
+            .0
+            .iter()
             .take(num_entries)
         {
             let tag = reader.read_u16(&entry[..2]);
@@ -334,7 +342,8 @@ pub(crate) fn find_embedded_jpegs_in_tiff(
             let Some(end) = offset.checked_add(length) else {
                 continue;
             };
-            if end <= raw_buf.len()
+            if length >= 2
+                && end <= raw_buf.len()
                 && (!cur_offset_is_strip && !cur_length_is_strip
                     || raw_buf[offset..].starts_with(b"\xFF\xD8\xFF"))
             {
@@ -393,7 +402,9 @@ pub(crate) fn find_tiff_preview(
         let mut candidate = TiffPreviewInfo::default();
 
         for entry in entries_cursor
-            .chunks_exact(IFD_ENTRY_SIZE)
+            .as_chunks::<IFD_ENTRY_SIZE>()
+            .0
+            .iter()
             .take(num_entries)
         {
             let tag = reader.read_u16(&entry[..2]);
@@ -556,7 +567,7 @@ pub(crate) fn try_tiff_preview(
         Ok(Some(get_jpeg_data(
             &jpeg_buf,
             &EmbeddedJpegInfo::new(0, jpeg_buf.len(), preview.orientation),
-        )))
+        )?))
     }
 }
 

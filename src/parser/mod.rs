@@ -23,7 +23,7 @@ pub(crate) async fn process_file_bytes(
     let (raw_buf, jpeg_info) = map_embedded_jpeg(entry_path, find_type)?;
     if let Some(jpeg_info) = jpeg_info {
         let jpeg_buf = jpeg::extract_jpeg(&raw_buf, &jpeg_info);
-        return Ok(jpeg::get_jpeg_data(jpeg_buf, &jpeg_info));
+        return jpeg::get_jpeg_data(jpeg_buf, &jpeg_info);
     }
 
     process_mapped_fallback(entry_path, find_type, raw_buf).await
@@ -351,6 +351,45 @@ mod tests {
     }
 
     #[test]
+    fn orientation_header_tiff_has_next_ifd_terminator() {
+        let header = jpeg::get_header_bytes(6);
+        assert_eq!(header.len(), 38);
+        assert_eq!(&header[4..6], &[0x00, 0x22]);
+        assert_eq!(&header[30..34], &[6, 0, 0, 0]);
+        assert_eq!(&header[34..38], &[0, 0, 0, 0]);
+        let candidates = find_embedded_jpegs_in_tiff(&header[12..], 0).unwrap();
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn tiff_jpeg_shorter_than_two_bytes_is_rejected() {
+        let mut buf = le_tiff(8);
+        buf.extend_from_slice(&2u16.to_le_bytes());
+        tiff_entry(&mut buf, 0x201, 4, 1, 40);
+        tiff_entry(&mut buf, 0x202, 4, 1, 1);
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.resize(41, 0xFF);
+        let candidates = find_embedded_jpegs_in_tiff(&buf, 0).unwrap();
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn assembling_short_jpeg_is_an_error() {
+        let err = get_jpeg_data(b"\xFF", &jpeg::EmbeddedJpegInfo::new(0, 1, None)).unwrap_err();
+        assert!(err.to_string().contains("too short"));
+    }
+
+    #[test]
+    fn raf_jpeg_shorter_than_two_bytes_is_rejected() {
+        let mut buf = Vec::from(&b"FUJIFILMCCD-RAW"[..]);
+        buf.resize(84, 0);
+        buf.extend_from_slice(&100u32.to_be_bytes());
+        buf.extend_from_slice(&1u32.to_be_bytes());
+        buf.resize(101, 0xFF);
+        assert!(find_raf_jpeg(&buf).is_none());
+    }
+
+    #[test]
     fn missing_ff_search_keeps_valid_smaller_candidate() {
         let valid = valid_missing_ff_candidate();
         let invalid = [0xD8, 0xFF, 0xDB, 0x00, 0x04, 0, 0, 0xFF, 0xD9];
@@ -600,7 +639,7 @@ mod tests {
                 .unwrap();
             let jpeg_buf = &buf[info.offset..info.offset + info.length];
             assert!(is_valid_jpeg(jpeg_buf));
-            std::hint::black_box(get_jpeg_data(jpeg_buf, &info));
+            std::hint::black_box(get_jpeg_data(jpeg_buf, &info).unwrap());
         });
 
         let scan_buffers = &buffers[..buffers.len().min(3)];
@@ -701,7 +740,7 @@ mod tests {
                         .unwrap();
                 let jpeg_buf = extract_jpeg(&raw_buf, &info);
                 assert!(is_valid_jpeg(jpeg_buf));
-                std::hint::black_box(get_jpeg_data(jpeg_buf, &info));
+                std::hint::black_box(get_jpeg_data(jpeg_buf, &info).unwrap());
             },
         );
     }

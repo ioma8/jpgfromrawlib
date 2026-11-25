@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 
@@ -22,6 +22,9 @@ pub async fn process_file(
     let (raw_buf, jpeg_info) = crate::parser_impl::map_embedded_jpeg(entry_path, find_type)?;
     if let Some(jpeg_info) = jpeg_info {
         let jpeg_buf = crate::parser_impl::jpeg::extract_jpeg(&raw_buf, &jpeg_info);
+        if jpeg_buf.len() < 2 {
+            bail!("JPEG data too short");
+        }
         let mut output = tokio::fs::File::create(&output_file).await?;
         output
             .write_all(&crate::parser_impl::jpeg::get_header_bytes(
