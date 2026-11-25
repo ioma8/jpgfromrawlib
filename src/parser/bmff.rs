@@ -102,17 +102,20 @@ fn preview_candidate(
     .ok()?;
     let jpeg_start = payload.checked_add(16)?;
     let jpeg_end = jpeg_start.checked_add(jpeg_size)?;
-    if jpeg_end <= box_end && raw_buf.get(jpeg_start..jpeg_start + 3) == Some(JPEG_SOI_PREFIX) {
+    if jpeg_size >= 2
+        && jpeg_end <= box_end
+        && raw_buf.get(jpeg_start..jpeg_start + 3) == Some(JPEG_SOI_PREFIX)
+    {
         return Some(EmbeddedJpegInfo::new(jpeg_start, jpeg_size, None));
     }
 
     let rel = memmem::find(raw_buf.get(payload..box_end)?, JPEG_SOI_PREFIX)?;
     let jpeg_start = payload + rel;
-    Some(EmbeddedJpegInfo::new(
-        jpeg_start,
-        box_end - jpeg_start,
-        None,
-    ))
+    let length = box_end - jpeg_start;
+    if length < 2 {
+        return None;
+    }
+    Some(EmbeddedJpegInfo::new(jpeg_start, length, None))
 }
 
 #[cfg(test)]

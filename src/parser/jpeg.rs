@@ -201,12 +201,12 @@ pub const fn is_sof_marker(marker: u8) -> bool {
 /// The embedded JPEG comes with no EXIF data. While most of it is outside of the scope of this
 /// application, it's pretty vexing to have the wrong orientation, so copy that over.
 #[rustfmt::skip]
-pub(crate) const fn get_header_bytes(orientation: u16) -> [u8; 34] {
+pub(crate) const fn get_header_bytes(orientation: u16) -> [u8; 38] {
     let orientation_bytes = orientation.to_le_bytes();
     [
         0xff, 0xd8, // SOI
         0xff, 0xe1, // APP1
-        0x00, 0x1e, // 30 bytes including this length
+        0x00, 0x22, // 34 bytes including this length
         0x45, 0x78, 0x69, 0x66, 0x00, 0x00, // Exif\0\0
         0x49, 0x49, 0x2A, 0x00, // TIFF LE
         0x08, 0x00, 0x00, 0x00, // Offset to IFD
@@ -214,24 +214,24 @@ pub(crate) const fn get_header_bytes(orientation: u16) -> [u8; 34] {
         0x12, 0x01, // Tag for orientation
         0x03, 0x00, // Type: SHORT
         0x01, 0x00, 0x00, 0x00, // Count: 1
-        orientation_bytes[0], orientation_bytes[1], // Orientation
-        0x00, 0x00, // Next IFD
+        orientation_bytes[0], orientation_bytes[1], 0x00, 0x00, // Orientation value
+        0x00, 0x00, 0x00, 0x00, // Next IFD offset: none
     ]
 }
 
-pub(crate) fn get_jpeg_data(jpeg_buf: &[u8], jpeg_info: &EmbeddedJpegInfo) -> Vec<u8> {
-    let mut jpeg_data = Vec::with_capacity(jpeg_buf.len() + 34);
+pub(crate) fn get_jpeg_data(jpeg_buf: &[u8], jpeg_info: &EmbeddedJpegInfo) -> Result<Vec<u8>> {
+    if jpeg_buf.len() < 2 {
+        anyhow::bail!("JPEG data too short");
+    }
+    let mut jpeg_data = Vec::with_capacity(jpeg_buf.len() + 36);
     jpeg_data.extend_from_slice(&get_header_bytes(jpeg_info.orientation.unwrap_or(1)));
     jpeg_data.extend_from_slice(&jpeg_buf[2..]);
-    jpeg_data
+    Ok(jpeg_data)
 }
 
 pub(crate) fn try_missing_ff(raw_buf: &[u8], find_type: FindJpegType) -> Option<Vec<u8>> {
     let jpeg_buf = find_embedded_jpeg_missing_ff_prefix(raw_buf, find_type).ok()?;
-    Some(get_jpeg_data(
-        &jpeg_buf,
-        &EmbeddedJpegInfo::new(0, jpeg_buf.len(), None),
-    ))
+    get_jpeg_data(&jpeg_buf, &EmbeddedJpegInfo::new(0, jpeg_buf.len(), None)).ok()
 }
 
 pub(crate) fn find_raf_jpeg(raw_buf: &[u8]) -> Option<EmbeddedJpegInfo> {
@@ -240,6 +240,9 @@ pub(crate) fn find_raf_jpeg(raw_buf: &[u8]) -> Option<EmbeddedJpegInfo> {
     }
     let offset = usize::try_from(BigEndian::read_u32(&raw_buf[84..88])).ok()?;
     let length = usize::try_from(BigEndian::read_u32(&raw_buf[88..92])).ok()?;
+    if length < 2 {
+        return None;
+    }
     let end = offset.checked_add(length)?;
     if end > raw_buf.len() || !raw_buf[offset..].starts_with(JPEG_SOI_PREFIX) {
         return None;
